@@ -10,7 +10,6 @@ use std::io::Read;
 use std::fs;
 use std::io::SeekFrom;
 use std::path::Path;
-use std::path::PathBuf; // Added this import to resolve E0412
 
 use std::fs::File;
 use std::collections::BTreeMap;
@@ -18,15 +17,28 @@ use std::io::Seek;
 use std::collections::HashMap;
 
 use std::time::Duration;
+use clap::Parser; // Add this line to import Parser from clap
+
 const IP_ADDRESS: &str = "192.168.25.8";
 const DIR_PATH: &str = "./";
 const NUM_THREADS: i32 = 256; // Number of threads in the thread pool
 
+// Define a struct to parse command-line arguments
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Optional port to listen on for TCP connections
+    #[arg(short, long, default_value_t = 8200)]
+    port: u16,
+}
 
 fn main() {
+    let cli = Cli::parse(); // Parse the command-line arguments
+
     let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
-    let tcp_listener = TcpListener::bind("0.0.0.0:8200").unwrap();
-    println!("DLNA server listening on port 8200");
+    // Use the parsed port from the CLI arguments
+    let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port)).unwrap();
+    println!("DLNA server listening on port {}", cli.port);
 
     let ssdp_socket = UdpSocket::bind("0.0.0.0:1900").unwrap();
     let multicast_addr = "239.255.255.250".parse().unwrap();
@@ -38,12 +50,13 @@ write!(
     "HTTP/1.1 200 OK\r\n\
 CACHE-CONTROL: max-age=1800\r\n\
 EXT:\r\n\
-LOCATION: http://{}:8200/rootDesc.xml\r\n\
+LOCATION: http://{}:{}/rootDesc.xml\r\n\
 SERVER: DLNA/1.0 DLNADOC/1.50 UPnP/1.0 RustyDLNA6/1.3.0\r\n\
 ST: urn:schemas-upnp-org:device:MediaServer:1\r\n\
 USN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\
 \r\n",
-    IP_ADDRESS
+    IP_ADDRESS,
+    cli.port // Use the parsed port here as well
 ).unwrap();
 let mut buffer = [0; 4096];
 
@@ -168,7 +181,7 @@ fn handle_head_request(mut stream: TcpStream) {
 
 fn handle_get_request(mut stream: TcpStream, http_request: &str) {
     let mut http_request_parts = http_request.split_whitespace();
-    let _http_method = match http_request_parts.next() { // Renamed http_method to _http_method to resolve warning
+    let http_method = match http_request_parts.next() {
         Some(method) => method,
         None => {
             eprintln!("Malformed HTTP request: missing method");
@@ -462,7 +475,7 @@ fn handle_post_request(
 
     let mut cache = match cache.lock() {
         Ok(locked_cache) => locked_cache,
-        Err(_poisoned) => { // Renamed poisoned to _poisoned to resolve warning
+        Err(poisoned) => {
             eprintln!("Mutex poisoned. Could not acquire lock.");
             return; // Or handle as needed
         }
@@ -483,7 +496,13 @@ fn handle_post_request(
     },
     false => {
         // Continue with the rest of the logic if object_id is not empty
-        // Removed the unused 'object_id_stripped' declaration from here
+        let object_id_stripped = object_id
+            .strip_prefix("64$")
+            .unwrap_or(object_id)
+            .strip_prefix("0")
+            .unwrap_or(object_id);
+
+        // You can continue processing the object_id_stripped here...
     }
 }
             let object_id_stripped = object_id.strip_prefix("64$").unwrap_or(object_id).strip_prefix("0").unwrap_or(object_id);
@@ -580,7 +599,7 @@ match fs::read_dir(combined_path.clone()) {
             }
         }
     }
-    Err(_err) => println!("Error reading directory: {}", combined_path), // Renamed err to _err to resolve warning
+    Err(err) => println!("Error reading directory: {}", combined_path),
 }
 
     let mut loop_count = 0;
