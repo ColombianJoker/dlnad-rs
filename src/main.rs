@@ -19,9 +19,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use clap::Parser; // Add this line to import Parser from clap
 
-const IP_ADDRESS: &str = "192.168.25.8";
-const DIR_PATH: &str = "./";
-const NUM_THREADS: i32 = 256; // Number of threads in the thread pool
+const NUM_THREADS: i32 = 64; // Number of threads on the thread pool
 
 // Define a struct to parse command-line arguments
 #[derive(Parser, Debug)]
@@ -30,6 +28,14 @@ struct Cli {
     /// Optional port to listen on for TCP connections
     #[arg(short, long, default_value_t = 8200)]
     port: u16,
+
+    /// IP address to use for the DLNA server
+    #[arg(short = 'i', long = "ip")]
+    ip_address: String,
+
+    /// Directory to share via DLNA
+    #[arg(short = 'd', long = "directory")]
+    directory: String,
 }
 
 fn main() {
@@ -42,7 +48,7 @@ fn main() {
 
     let ssdp_socket = UdpSocket::bind("0.0.0.0:1900").unwrap();
     let multicast_addr = "239.255.255.250".parse().unwrap();
-    ssdp_socket.join_multicast_v4(&multicast_addr, &IP_ADDRESS.parse().unwrap()).unwrap();
+    ssdp_socket.join_multicast_v4(&multicast_addr, &cli.ip_address.parse().unwrap()).unwrap(); // Use cli.ip_address
 let mut response_bytes = Vec::new();
 
 write!(
@@ -55,7 +61,7 @@ SERVER: DLNA/1.0 DLNADOC/1.50 UPnP/1.0 RustyDLNA6/1.3.0\r\n\
 ST: urn:schemas-upnp-org:device:MediaServer:1\r\n\
 USN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\
 \r\n",
-    IP_ADDRESS,
+    cli.ip_address, // Use cli.ip_address
     cli.port // Use the parsed port here as well
 ).unwrap();
 let mut buffer = [0; 4096];
@@ -83,11 +89,14 @@ thread::spawn(move || {
     for _ in 0..NUM_THREADS {
         let rx = Arc::clone(&rx);
         let cache = Arc::clone(&cache);
+        let ip_address_clone = cli.ip_address.clone(); // Clone ip_address for the thread
+        let directory_clone = cli.directory.clone(); // Clone directory for the thread
+
         thread::spawn(move || {
             loop {
                 let stream = rx.lock().unwrap().recv().unwrap();
                 // Handle each TCP connection
-                handle_client(stream, cache.clone());
+                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone()); // Pass ip_address and directory
             }
         });
     }
@@ -105,7 +114,7 @@ thread::spawn(move || {
     }
 }
 
-fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>) {
+fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String) { // Add ip_address and directory
 	
 let mut buffer = Vec::new();
 let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
@@ -150,9 +159,9 @@ match buffer.is_empty() {
     false => match std::str::from_utf8(&buffer) {
         Ok(request) => match request.split_whitespace().next() {
             Some(method) => match method.to_uppercase().as_str() {
-                "GET" => handle_get_request(stream, request),
+                "GET" => handle_get_request(stream, request, ip_address, directory), // Pass ip_address and directory
                 "HEAD" => handle_head_request(stream),
-                "POST" => handle_post_request(stream, request.to_string(), cache),
+                "POST" => handle_post_request(stream, request.to_string(), cache, ip_address, directory), // Pass ip_address and directory
                 _ => eprintln!("Unsupported HTTP method: {}", method),
             },
             None => eprintln!("Malformed HTTP request: missing method"),
@@ -179,7 +188,7 @@ fn handle_head_request(mut stream: TcpStream) {
 
 
 
-fn handle_get_request(mut stream: TcpStream, http_request: &str) {
+fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: String, directory: String) { // Add ip_address and directory
     let mut http_request_parts = http_request.split_whitespace();
     let http_method = match http_request_parts.next() {
         Some(method) => method,
@@ -198,7 +207,7 @@ fn handle_get_request(mut stream: TcpStream, http_request: &str) {
     let decoded_path = decode(http_path);
     let trimmed_path = decoded_path.trim_start_matches(['.', '/']);
 	
-    let combined_path = format!("{}/{}", DIR_PATH, decoded_path);
+    let combined_path = format!("{}/{}", directory, decoded_path); // Use directory
 
     let mut file = match trimmed_path {
         "icons/lrg.png" => {
@@ -395,6 +404,8 @@ fn handle_post_request(
     mut stream: TcpStream,
     request: String,
     cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ip_address: String, // Add ip_address
+    directory: String,  // Add directory
 ) {
     println!("Request: {}", request);
     
@@ -506,7 +517,7 @@ fn handle_post_request(
     }
 }
             let object_id_stripped = object_id.strip_prefix("64$").unwrap_or(object_id).strip_prefix("0").unwrap_or(object_id);
-            let combined_path = format!("{}/{}", DIR_PATH, &decode(object_id_stripped));
+            let combined_path = format!("{}/{}", directory, &decode(object_id_stripped)); // Use directory
             println!("Path Requested: {}", combined_path);
             println!("ObjectID Requested: {}", object_id_stripped);
 
@@ -519,6 +530,8 @@ fn handle_post_request(
                     object_id_stripped,
                     &starting_index.unwrap(),
                     &requested_count, // Use the updated requested_count here
+                    ip_address, // Pass ip_address
+                    directory,  // Pass directory
                 );
                 let response_bytes = browse_response.as_bytes(); // Convert the browse response to bytes.
 
@@ -532,7 +545,7 @@ fn handle_post_request(
             } else if path.is_file() {
                 println!("It's a file {}", path.display());
                 // If it's a file, call generate_meta.
-                let meta_response = generate_meta_response(object_id);
+                let meta_response = generate_meta_response(object_id, ip_address); // Pass ip_address
                 let response_bytes = meta_response.as_bytes(); // Convert the metadata response to bytes.
 
                 // Write the response to the stream.
@@ -541,7 +554,7 @@ fn handle_post_request(
             } else {
                 // Handle the case where the object is neither a folder nor a file (e.g., symbolic link, invalid path, etc.).
                 eprintln!("Error: ObjectID {} is neither a valid file nor a valid folder.", object_id);
-                return; // You could handle this differently, such as returning an error response.
+                return; // You could handle this differently, such as returning an.
             }
         }
     }
@@ -549,12 +562,12 @@ fn handle_post_request(
 
 
 
-fn generate_meta_response(path: &str) -> String {
+fn generate_meta_response(path: &str, ip_address: String) -> String { // Add ip_address
     // Hardcoded Date header and XML content as specified.
     let date_header = "Fri, 08 Nov 2024 05:39:08 GMT";
     let result_xml = format!(
         r#"&lt;DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"&gt;&lt;item id="64$0" parentID="64" restricted="1"&gt;&lt;dc:title&gt;&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;dc:date&gt;2024-11-07T21:38:51&lt;/dc:date&gt;&lt;upnp:playbackCount&gt;0&lt;/upnp:playbackCount&gt;&lt;res size="21397012" duration="0:01:00.019" resolution="3840x2160" protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"&gt;http://{}:8200/{}&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#,
-        IP_ADDRESS,
+        ip_address, // Use ip_address
 	path
     );
 	println!("{}", result_xml);
@@ -568,9 +581,9 @@ fn generate_meta_response(path: &str) -> String {
     response
 }
 
-fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &u32) -> String {
+fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &u32, ip_address: String, directory: String) -> String { // Add ip_address and directory
 
-    let combined_path = format!("{}/{}", DIR_PATH, &decode(path));
+    let combined_path = format!("{}/{}", directory, &decode(path)); // Use directory
     let mut soap_response = String::with_capacity(1024);
     let mut count = 0;
 
@@ -646,7 +659,7 @@ for (name, _) in directories {
 
         soap_response += &format!(
             "&lt;item id=\"{}{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;res protocolInfo=\"http-get:*:video/mp4:*\"&gt;http://{}:8200/{}{}&lt;/res&gt;&lt;/item&gt;",
-            path, encode(&name), encode(path), encode_title_name(&name), IP_ADDRESS, encode(path), encode(&name)
+            path, encode(&name), encode(path), encode_title_name(&name), ip_address, encode(path), encode(&name) // Use ip_address
         );
 
 
