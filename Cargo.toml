@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# No external dependencies
+log = "0.4" # Logging facade
+env_logger = "0.11" # A logger implementation that uses environment variables
+gethostname = "0.4" # To get the default hostname for advertising IP
+clap = { version = "4", features = ["derive"] }

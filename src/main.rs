@@ -10,6 +10,7 @@ use std::io::Read;
 use std::fs;
 use std::io::SeekFrom;
 use std::path::Path;
+use std::path::PathBuf; // Added this import to resolve E0412
 
 use std::fs::File;
 use std::collections::BTreeMap;
@@ -167,7 +168,7 @@ fn handle_head_request(mut stream: TcpStream) {
 
 fn handle_get_request(mut stream: TcpStream, http_request: &str) {
     let mut http_request_parts = http_request.split_whitespace();
-    let http_method = match http_request_parts.next() {
+    let _http_method = match http_request_parts.next() { // Renamed http_method to _http_method to resolve warning
         Some(method) => method,
         None => {
             eprintln!("Malformed HTTP request: missing method");
@@ -461,7 +462,7 @@ fn handle_post_request(
 
     let mut cache = match cache.lock() {
         Ok(locked_cache) => locked_cache,
-        Err(poisoned) => {
+        Err(_poisoned) => { // Renamed poisoned to _poisoned to resolve warning
             eprintln!("Mutex poisoned. Could not acquire lock.");
             return; // Or handle as needed
         }
@@ -482,13 +483,7 @@ fn handle_post_request(
     },
     false => {
         // Continue with the rest of the logic if object_id is not empty
-        let object_id_stripped = object_id
-            .strip_prefix("64$")
-            .unwrap_or(object_id)
-            .strip_prefix("0")
-            .unwrap_or(object_id);
-
-        // You can continue processing the object_id_stripped here...
+        // Removed the unused 'object_id_stripped' declaration from here
     }
 }
             let object_id_stripped = object_id.strip_prefix("64$").unwrap_or(object_id).strip_prefix("0").unwrap_or(object_id);
@@ -585,7 +580,7 @@ match fs::read_dir(combined_path.clone()) {
             }
         }
     }
-    Err(err) => println!("Error reading directory: {}", combined_path),
+    Err(_err) => println!("Error reading directory: {}", combined_path), // Renamed err to _err to resolve warning
 }
 
     let mut loop_count = 0;
