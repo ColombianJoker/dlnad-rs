@@ -1,3 +1,4 @@
+// main.rs
 use std::net::TcpListener;
 use std::net::UdpSocket;
 use std::thread;
@@ -30,12 +31,16 @@ struct Cli {
     port: u16,
 
     /// IP address to use for the DLNA server
-    #[arg(short = 'i', long = "ip")]
+    #[arg(short = 'i', long = "ip", default_value = "0.0.0.0")]
     ip_address: String,
 
     /// Directory to share via DLNA
-    #[arg(short = 'd', long = "directory")]
+    #[arg(short = 'd', long = "directory", default_value = ".")]
     directory: String,
+
+    /// Name of the DLNA server to be shown to clients
+    #[arg(short, long, default_value = "RustyDLNA")]
+    name: String,
 }
 
 fn main() {
@@ -49,37 +54,38 @@ fn main() {
     let ssdp_socket = UdpSocket::bind("0.0.0.0:1900").unwrap();
     let multicast_addr = "239.255.255.250".parse().unwrap();
     ssdp_socket.join_multicast_v4(&multicast_addr, &cli.ip_address.parse().unwrap()).unwrap(); // Use cli.ip_address
-let mut response_bytes = Vec::new();
+    let mut response_bytes = Vec::new();
 
-write!(
-    response_bytes,
-    "HTTP/1.1 200 OK\r\n\
-CACHE-CONTROL: max-age=1800\r\n\
-EXT:\r\n\
-LOCATION: http://{}:{}/rootDesc.xml\r\n\
-SERVER: DLNA/1.0 DLNADOC/1.50 UPnP/1.0 RustyDLNA6/1.3.0\r\n\
-ST: urn:schemas-upnp-org:device:MediaServer:1\r\n\
-USN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\
-\r\n",
-    cli.ip_address, // Use cli.ip_address
-    cli.port // Use the parsed port here as well
-).unwrap();
-let mut buffer = [0; 4096];
+    write!(
+        response_bytes,
+        "HTTP/1.1 200 OK\r\n\
+        CACHE-CONTROL: max-age=1800\r\n\
+        EXT:\r\n\
+        LOCATION: http://{}:{}/rootDesc.xml\r\n\
+        SERVER: DLNA/1.0 DLNADOC/1.50 UPnP/1.0 {}/1.3.0\r\n\
+        ST: urn:schemas-upnp-org:device:MediaServer:1\r\n\
+        USN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\
+        \r\n",
+        cli.ip_address, // Use cli.ip_address
+        cli.port, // Use the parsed port here as well
+        cli.name // Use the provided server name
+    ).unwrap();
+    let mut buffer = [0; 4096];
 
-thread::spawn(move || {
-    loop {
-        match ssdp_socket.recv_from(&mut buffer) {
-            Ok((_size, src_addr)) => {
-                println!("Received SSDP search request from: {:?} Size: {}", src_addr, buffer.len());
-                match ssdp_socket.send_to(&response_bytes, src_addr) {
-                    Err(err) => eprintln!("Failed to send SSDP response: {:?}", err),
-                    Ok(_) => println!("Sent SSDP response to: {:?}", src_addr),
+    thread::spawn(move || {
+        loop {
+            match ssdp_socket.recv_from(&mut buffer) {
+                Ok((_size, src_addr)) => {
+                    println!("Received SSDP search request from: {:?} Size: {}", src_addr, buffer.len());
+                    match ssdp_socket.send_to(&response_bytes, src_addr) {
+                        Err(err) => eprintln!("Failed to send SSDP response: {:?}", err),
+                        Ok(_) => println!("Sent SSDP response to: {:?}", src_addr),
+                    }
                 }
+                Err(err) => eprintln!("Failed to receive SSDP request: {:?}", err),
             }
-            Err(err) => eprintln!("Failed to receive SSDP request: {:?}", err),
         }
-    }
-});
+    });
 
     // Create a channel for communication between the main thread and worker threads
     let (tx, rx) = mpsc::channel();
@@ -91,12 +97,13 @@ thread::spawn(move || {
         let cache = Arc::clone(&cache);
         let ip_address_clone = cli.ip_address.clone(); // Clone ip_address for the thread
         let directory_clone = cli.directory.clone(); // Clone directory for the thread
+        let name_clone = cli.name.clone(); // Clone name for the thread
 
         thread::spawn(move || {
             loop {
                 let stream = rx.lock().unwrap().recv().unwrap();
                 // Handle each TCP connection
-                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone()); // Pass ip_address and directory
+                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone(), name_clone.clone()); // Pass ip_address, directory, and name
             }
         });
     }
@@ -114,61 +121,61 @@ thread::spawn(move || {
     }
 }
 
-fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String) { // Add ip_address and directory
+fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String, name: String) { // Add ip_address, directory, and name
 	
-let mut buffer = Vec::new();
-let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
-let _ = stream.set_write_timeout(Some(Duration::from_millis(5000)));
+    let mut buffer = Vec::new();
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(5000)));
 
-loop {
-    let mut buf = vec![0; 4096]; // Temporary buffer for each read operation
-    match stream.read(&mut buf) {
-        Ok(0) => {
-            // End of stream (EOF) reached, break out of the loop
-            break;
-        },
-        Ok(n) => {
-            // Data read successfully, extend buffer with the actual data read
-            buffer.extend_from_slice(&buf[..n]);
-            match n < buf.len() {
-                true => {
-                    // Less than a full buffer read, so we're done
-                    break;
-                },
-                false => (),
-            }
-        },
-        Err(e) => {
-            match e.kind() {
-                std::io::ErrorKind::WouldBlock => {
-                    // Non-blocking operation would block, continue looping or take other action
-                    // Continue looping or take appropriate action depending on your application logic
-                    // In some cases, you might want to sleep or wait before attempting to read again
-                },
-                _ => {
-                    // Error occurred during read operation, break out of the loop or handle the error
-                    break;
+    loop {
+        let mut buf = vec![0; 4096]; // Temporary buffer for each read operation
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                // End of stream (EOF) reached, break out of the loop
+                break;
+            },
+            Ok(n) => {
+                // Data read successfully, extend buffer with the actual data read
+                buffer.extend_from_slice(&buf[..n]);
+                match n < buf.len() {
+                    true => {
+                        // Less than a full buffer read, so we're done
+                        break;
+                    },
+                    false => (),
+                }
+            },
+            Err(e) => {
+                match e.kind() {
+                    std::io::ErrorKind::WouldBlock => {
+                        // Non-blocking operation would block, continue looping or take other action
+                        // Continue looping or take appropriate action depending on your application logic
+                        // In some cases, you might want to sleep or wait before attempting to read again
+                    },
+                    _ => {
+                        // Error occurred during read operation, break out of the loop or handle the error
+                        break;
+                    }
                 }
             }
         }
     }
-}
 
-match buffer.is_empty() {
-    true => (),
-    false => match std::str::from_utf8(&buffer) {
-        Ok(request) => match request.split_whitespace().next() {
-            Some(method) => match method.to_uppercase().as_str() {
-                "GET" => handle_get_request(stream, request, ip_address, directory), // Pass ip_address and directory
-                "HEAD" => handle_head_request(stream),
-                "POST" => handle_post_request(stream, request.to_string(), cache, ip_address, directory), // Pass ip_address and directory
-                _ => eprintln!("Unsupported HTTP method: {}", method),
+    match buffer.is_empty() {
+        true => (),
+        false => match std::str::from_utf8(&buffer) {
+            Ok(request) => match request.split_whitespace().next() {
+                Some(method) => match method.to_uppercase().as_str() {
+                    "GET" => handle_get_request(stream, request, ip_address, directory, name), // Pass ip_address, directory, and name
+                    "HEAD" => handle_head_request(stream),
+                    "POST" => handle_post_request(stream, request.to_string(), cache, ip_address, directory), // Pass ip_address and directory
+                    _ => eprintln!("Unsupported HTTP method: {}", method),
+                },
+                None => eprintln!("Malformed HTTP request: missing method"),
             },
-            None => eprintln!("Malformed HTTP request: missing method"),
+            Err(err) => eprintln!("Error decoding HTTP request: {}", err),
         },
-        Err(err) => eprintln!("Error decoding HTTP request: {}", err),
-    },
-}
+    }
 
 }
 
@@ -188,7 +195,7 @@ fn handle_head_request(mut stream: TcpStream) {
 
 
 
-fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: String, directory: String) { // Add ip_address and directory
+fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: String, directory: String, name: String) { // Add ip_address, directory, and name
     let mut http_request_parts = http_request.split_whitespace();
     let http_method = match http_request_parts.next() {
         Some(method) => method,
@@ -226,7 +233,7 @@ fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: Str
             }
         }
         "ContentDir.xml" => {
-            let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>GetSearchCapabilities</name><argumentList><argument><name>SearchCaps</name><direction>out</direction><relatedStateVariable>SearchCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSortCapabilities</name><argumentList><argument><name>SortCaps</name><direction>out</direction><relatedStateVariable>SortCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSystemUpdateID</name><argumentList><argument><name>Id</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument></argumentList></action><action><name>Browse</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>BrowseFlag</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_BrowseFlag</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument></argumentList></action><action><name>Search</name><argumentList><argument><name>ContainerID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>SearchCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SearchCriteria</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument></argumentList></action><action><name>UpdateObject</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>CurrentTagValue</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_TagValueList</relatedStateVariable></argument><argument><name>NewTagValue</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_TagValueList</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>TransferIDs</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SearchCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType><allowedValueList><allowedValue>BrowseMetadata</allowedValue><allowedValue>BrowseDirectChildren</allowedValue></allowedValueList></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Filter</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_TagValueList</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SearchCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SortCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable></serviceStateTable></scpd>";
+            let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>GetSearchCapabilities</name><argumentList><argument><name>SearchCaps</name><direction>out</direction><relatedStateVariable>SearchCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSortCapabilities</name><argumentList><argument><name>SortCaps</name><direction>out</direction><relatedStateVariable>SortCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSystemUpdateID</name><argumentList><argument><name>Id</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument></argumentList></action><action><name>Browse</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>BrowseFlag</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_BrowseFlag</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument></argumentList></action><action><name>Search</name><argumentList><argument><name>ContainerID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>SearchCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SearchCriteria</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument></argumentList></action><action><name>UpdateObject</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>CurrentTagValue</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_TagValueList</relatedStateVariable></argument><argument><name>NewTagValue</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_TagValueList</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>TransferIDs</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SearchCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType><allowedValueList><allowedValue>BrowseMetadata</allowedValue><allowedValue>BrowseDirectChildren</allowedValue></allowedValueList></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Filter</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_TagValueList</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SearchCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SortCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable></serviceStateTable></scpd>";
            let mut response = Vec::new();
 
 				write!(
@@ -249,9 +256,9 @@ fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: Str
 				}
         }
         "X_MS_MediaReceiverRegistrar.xml" => {
-let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>IsAuthorized</name><argumentList><argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument></argumentList></action><action><name>IsValidated</name><argumentList><argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument></argumentList></action><action><name>RegisterDevice</name><argumentList><argument><name>RegistrationReqMsg</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_RegistrationReqMsg</relatedStateVariable></argument><argument><name>RegistrationRespMsg</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RegistrationRespMsg</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_DeviceID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RegistrationReqMsg</name><dataType>bin.base64</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RegistrationRespMsg</name><dataType>bin.base64</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>int</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>AuthorizationDeniedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>AuthorizationGrantedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>ValidationRevokedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>ValidationSucceededUpdateID</name><dataType>ui4</dataType></stateVariable></serviceStateTable></scpd>";
+            let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>IsAuthorized</name><argumentList><argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument></argumentList></action><action><name>IsValidated</name><argumentList><argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument></argumentList></action><action><name>RegisterDevice</name><argumentList><argument><name>RegistrationReqMsg</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_RegistrationReqMsg</relatedStateVariable></argument><argument><name>RegistrationRespMsg</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RegistrationRespMsg</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_DeviceID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RegistrationReqMsg</name><dataType>bin.base64</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RegistrationRespMsg</name><dataType>bin.base64</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>int</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>AuthorizationDeniedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>AuthorizationGrantedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>ValidationRevokedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>ValidationSucceededUpdateID</name><dataType>ui4</dataType></stateVariable></serviceStateTable></scpd>";
             
-let mut response = Vec::new();
+            let mut response = Vec::new();
 
 			write!(
 				response,
@@ -296,7 +303,59 @@ let mut response = Vec::new();
 			}
         }
         "rootDesc.xml" => {
-            let xml_content = "<?xml version=\"1.0\"?>\r\n<root xmlns=\"urn:schemas-upnp-org:device-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><device><deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType><friendlyName>RustyDLNA6</friendlyName><manufacturer>RustyDLNA6</manufacturer><manufacturerURL>http://www.netgear.com/</manufacturerURL><modelDescription>RustyDLNA on Linux</modelDescription><modelName>Windows Media Connect compatible (MiniDLNA)</modelName><modelNumber>1.3.0</modelNumber><modelURL>http://www.netgear.com</modelURL><serialNumber>00000000</serialNumber><UDN>uuid:4d696e69-444c-164e-9d41-b827eb96c6c2</UDN><dlna:X_DLNADOC xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">DMS-1.50</dlna:X_DLNADOC><presentationURL>/</presentationURL><iconList><icon><mimetype>image/png</mimetype><width>48</width><height>48</height><depth>24</depth><url>/icons/sm.png</url></icon><icon><mimetype>image/png</mimetype><width>120</width><height>120</height><depth>24</depth><url>/icons/lrg.png</url></icon><icon><mimetype>image/jpeg</mimetype><width>48</width><height>48</height><depth>24</depth><url>/icons/sm.jpg</url></icon><icon><mimetype>image/jpeg</mimetype><width>120</width><height>120</height><depth>24</depth><url>/icons/lrg.jpg</url></icon></iconList><serviceList><service><serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType><serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId><controlURL>/ctl/ContentDir</controlURL><eventSubURL>/evt/ContentDir</eventSubURL><SCPDURL>/ContentDir.xml</SCPDURL></service><service><serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType><serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId><controlURL>/ctl/ConnectionMgr</controlURL><eventSubURL>/evt/ConnectionMgr</eventSubURL><SCPDURL>/ConnectionMgr.xml</SCPDURL></service><service><serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType><serviceId>urn:microsoft.com:serviceId:X_MS_MediaReceiverRegistrar</serviceId><controlURL>/ctl/X_MS_MediaReceiverRegistrar</controlURL><eventSubURL>/evt/X_MS_MediaReceiverRegistrar</eventSubURL><SCPDURL>/X_MS_MediaReceiverRegistrar.xml</SCPDURL></service></serviceList></device></root>";
+            let xml_content = format!(
+                r#"<?xml version="1.0"?>
+                <root xmlns="urn:schemas-upnp-org:device-1-0">
+                    <specVersion>
+                        <major>1</major>
+                        <minor>0</minor>
+                    </specVersion>
+                    <device>
+                        <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>
+                        <friendlyName>{}</friendlyName>
+                        <manufacturer>{}</manufacturer>
+                        <manufacturerURL>http://www.netgear.com/</manufacturerURL>
+                        <modelDescription>{} on Linux</modelDescription>
+                        <modelName>Windows Media Connect compatible ({})</modelName>
+                        <modelNumber>1.3.0</modelNumber>
+                        <modelURL>http://www.netgear.com</modelURL>
+                        <serialNumber>00000000</serialNumber>
+                        <UDN>uuid:4d696e69-444c-164e-9d41-b827eb96c6c2</UDN>
+                        <dlna:X_DLNADOC xmlns:dlna="urn:schemas-dlna-org:device-1-0">DMS-1.50</dlna:X_DLNADOC>
+                        <presentationURL>/</presentationURL>
+                        <iconList>
+                            <icon><mimetype>image/png</mimetype><width>48</width><height>48</height><depth>24</depth><url>/icons/sm.png</url></icon>
+                            <icon><mimetype>image/png</mimetype><width>120</width><height>120</height><depth>24</depth><url>/icons/lrg.png</url></icon>
+                            <icon><mimetype>image/jpeg</mimetype><width>48</width><height>48</height><depth>24</depth><url>/icons/sm.jpg</url></icon>
+                            <icon><mimetype>image/jpeg</mimetype><width>120</width><height>120</height><depth>24</depth><url>/icons/lrg.jpg</url></icon>
+                        </iconList>
+                        <serviceList>
+                            <service>
+                                <serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>
+                                <serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId>
+                                <controlURL>/ctl/ContentDir</controlURL>
+                                <eventSubURL>/evt/ContentDir</eventSubURL>
+                                <SCPDURL>/ContentDir.xml</SCPDURL>
+                            </service>
+                            <service>
+                                <serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>
+                                <serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>
+                                <controlURL>/ctl/ConnectionMgr</controlURL>
+                                <eventSubURL>/evt/ConnectionMgr</eventSubURL>
+                                <SCPDURL>/ConnectionMgr.xml</SCPDURL>
+                            </service>
+                            <service>
+                                <serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType>
+                                <serviceId>urn:microsoft.com:serviceId:X_MS_MediaReceiverRegistrar</serviceId>
+                                <controlURL>/ctl/X_MS_MediaReceiverRegistrar</controlURL>
+                                <eventSubURL>/evt/X_MS_MediaReceiverRegistrar</eventSubURL>
+                                <SCPDURL>/X_MS_MediaReceiverRegistrar.xml</SCPDURL>
+                            </service>
+                        </serviceList>
+                    </device>
+                </root>"#,
+                name, name, name, name // Use the provided name
+            );
             let mut response = Vec::new();
 
 			write!(
@@ -327,24 +386,24 @@ let mut response = Vec::new();
         },
     };
 
-// Extracting Range header
-let mut range: u64 = 0;
-match http_request.lines().find(|line| line.starts_with("Range: bytes=")) {
-    Some(line) => {
-        match line.strip_prefix("Range: bytes=") {
-            Some(r) => {
-                match r.split('-').next().and_then(|num| num.parse::<u64>().ok()) {
-                    Some(parsed_range) => {
-                        range = parsed_range;
+    // Extracting Range header
+    let mut range: u64 = 0;
+    match http_request.lines().find(|line| line.starts_with("Range: bytes=")) {
+        Some(line) => {
+            match line.strip_prefix("Range: bytes=") {
+                Some(r) => {
+                    match r.split('-').next().and_then(|num| num.parse::<u64>().ok()) {
+                        Some(parsed_range) => {
+                            range = parsed_range;
+                        }
+                        None => println!("Failed to parse range value"),
                     }
-                    None => println!("Failed to parse range value"),
                 }
+                None => println!("Failed to strip prefix from Range header"),
             }
-            None => println!("Failed to strip prefix from Range header"),
         }
+        None => println!("No Range header found"),
     }
-    None => println!("No Range header found"),
-}
 
     let file_size = file.metadata().unwrap().len();
 
@@ -500,22 +559,22 @@ fn handle_post_request(
             return;
         }
         None => {
-		match object_id.is_empty() {
-    true => {
-        eprintln!("Error: ObjectID is empty.");
-        return; // Return early if object_id is empty
-    },
-    false => {
-        // Continue with the rest of the logic if object_id is not empty
-        let object_id_stripped = object_id
-            .strip_prefix("64$")
-            .unwrap_or(object_id)
-            .strip_prefix("0")
-            .unwrap_or(object_id);
+		    match object_id.is_empty() {
+                true => {
+                    eprintln!("Error: ObjectID is empty.");
+                    return; // Return early if object_id is empty
+                },
+                false => {
+                    // Continue with the rest of the logic if object_id is not empty
+                    let object_id_stripped = object_id
+                        .strip_prefix("64$")
+                        .unwrap_or(object_id)
+                        .strip_prefix("0")
+                        .unwrap_or(object_id);
 
-        // You can continue processing the object_id_stripped here...
-    }
-}
+                    // You can continue processing the object_id_stripped here...
+                }
+            }
             let object_id_stripped = object_id.strip_prefix("64$").unwrap_or(object_id).strip_prefix("0").unwrap_or(object_id);
             let combined_path = format!("{}/{}", directory, &decode(object_id_stripped)); // Use directory
             println!("Path Requested: {}", combined_path);
@@ -592,56 +651,56 @@ fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &
     let mut directories = BTreeMap::new();
     let mut files = BTreeMap::new();
 
-match fs::read_dir(combined_path.clone()) {
-    Ok(dir_entries) => {
-        for entry in dir_entries.filter_map(Result::ok) {
-            match entry.file_name().to_str() {
-                Some(name) => {
-                    let entry_path = entry.path();
-                    let is_dir = entry_path.is_dir();
-                    match is_dir {
-                        true => {
-                            directories.insert(name.to_string(), entry_path);
-                        }
-                        false => {
-                            files.insert(name.to_string(), entry_path);
-                        }
-                    };
+    match fs::read_dir(combined_path.clone()) {
+        Ok(dir_entries) => {
+            for entry in dir_entries.filter_map(Result::ok) {
+                match entry.file_name().to_str() {
+                    Some(name) => {
+                        let entry_path = entry.path();
+                        let is_dir = entry_path.is_dir();
+                        match is_dir {
+                            true => {
+                                directories.insert(name.to_string(), entry_path);
+                            }
+                            false => {
+                                files.insert(name.to_string(), entry_path);
+                            }
+                        };
+                    }
+                    None => println!("Failed to convert entry name to string"),
                 }
-                None => println!("Failed to convert entry name to string"),
             }
         }
+        Err(err) => println!("Error reading directory: {}", combined_path),
     }
-    Err(err) => println!("Error reading directory: {}", combined_path),
-}
 
     let mut loop_count = 0;
-// Process directories first
-for (name, _) in directories {
-    match loop_count >= *starting_index + requested_count {
-        true => break,
-        false => (),
-    }
-    match loop_count < *starting_index {
-        true => {
-            loop_count += 1;
-            continue;
+    // Process directories first
+    for (name, _) in directories {
+        match loop_count >= *starting_index + requested_count {
+            true => break,
+            false => (),
         }
-        false => (),
-    }
+        match loop_count < *starting_index {
+            true => {
+                loop_count += 1;
+                continue;
+            }
+            false => (),
+        }
 
-    soap_response += &format!(
+        soap_response += &format!(
+            "&lt;container id=\"{}{}/\" parentID=\"{}/\" restricted=\"1\" searchable=\"1\" childCount=\"0\"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;&lt;/container&gt;",
+            path, encode_title_name(&name), path, encode_title_name(&name)
+        );
+        println!(
         "&lt;container id=\"{}{}/\" parentID=\"{}/\" restricted=\"1\" searchable=\"1\" childCount=\"0\"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;&lt;/container&gt;",
         path, encode_title_name(&name), path, encode_title_name(&name)
     );
-    println!(
-    "&lt;container id=\"{}{}/\" parentID=\"{}/\" restricted=\"1\" searchable=\"1\" childCount=\"0\"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;object.container.storageFolder&lt;/upnp:class&gt;&lt;upnp:storageUsed&gt;-1&lt;/upnp:storageUsed&gt;&lt;/container&gt;",
-    path, encode_title_name(&name), path, encode_title_name(&name)
-);
 
-    loop_count += 1;
-    count += 1;
-}
+        loop_count += 1;
+        count += 1;
+    }
 
     // Process files
     for (name, _) in files {
