@@ -21,6 +21,12 @@ use std::time::Duration;
 use clap::Parser; // Add this line to import Parser from clap
 
 const NUM_THREADS: i32 = 64; // Number of threads on the thread pool
+const CONTENT_DIR_XML: &str = include_str!("ContentDir.xml");
+const X_MS_MEDIA_RECEIVER_REGISTRAR_XML: &str = include_str!("X_MS_MediaReceiverRegistrar.xml");
+const CONNECTION_MGR_XML: &str = include_str!("ConnectionMgr.xml");
+const ROOT_DESC_XML: &str = include_str!("rootDesc.xml");
+const GET_SORT_CAPABILITIES_RESPONSE_XML: &str = include_str!("get_sort_capabilities_response.xml");
+const META_RESPONSE_RESULT_XML_TEMPLATE: &str = include_str!("meta_response_result.xml");
 
 // Define a struct to parse command-line arguments
 #[derive(Parser, Debug)]
@@ -233,150 +239,98 @@ fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: Str
             }
         }
         "ContentDir.xml" => {
-            let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>GetSearchCapabilities</name><argumentList><argument><name>SearchCaps</name><direction>out</direction><relatedStateVariable>SearchCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSortCapabilities</name><argumentList><argument><name>SortCaps</name><direction>out</direction><relatedStateVariable>SortCapabilities</relatedStateVariable></argument></argumentList></action><action><name>GetSystemUpdateID</name><argumentList><argument><name>Id</name><direction>out</direction><relatedStateVariable>SystemUpdateID</relatedStateVariable></argument></argumentList></action><action><name>Browse</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>BrowseFlag</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_BrowseFlag</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument></argumentList></action><action><name>Search</name><argumentList><argument><name>ContainerID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>SearchCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SearchCriteria</relatedStateVariable></argument><argument><name>Filter</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Filter</relatedStateVariable></argument><argument><name>StartingIndex</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Index</relatedStateVariable></argument><argument><name>RequestedCount</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>SortCriteria</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_SortCriteria</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument><argument><name>NumberReturned</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><name>TotalMatches</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Count</relatedStateVariable></argument><argument><name>UpdateID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_UpdateID</relatedStateVariable></argument></argumentList></action><action><name>UpdateObject</name><argumentList><argument><name>ObjectID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ObjectID</relatedStateVariable></argument><argument><name>CurrentTagValue</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_TagValueList</relatedStateVariable></argument><argument><name>NewTagValue</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_TagValueList</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>TransferIDs</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ObjectID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SearchCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_BrowseFlag</name><dataType>string</dataType><allowedValueList><allowedValue>BrowseMetadata</allowedValue><allowedValue>BrowseDirectChildren</allowedValue></allowedValueList></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Filter</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_SortCriteria</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Index</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Count</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_UpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_TagValueList</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SearchCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>SortCapabilities</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>SystemUpdateID</name><dataType>ui4</dataType></stateVariable></serviceStateTable></scpd>";
-           let mut response = Vec::new();
+                    let xml_content = CONTENT_DIR_XML;
+                    let mut response = Vec::new();
 
-				write!(
-					response,
-					"HTTP/1.1 200 OK\r\n\
-				Content-Length: {}\r\n\
-				Content-Type: text/xml\r\n\
-				\r\n\
-				{}",
-					xml_content.len(),
-					xml_content
-				).unwrap();
+        				write!(
+        					response,
+        					"HTTP/1.1 200 OK\r\n\
+        				Content-Length: {}\r\n\
+        				Content-Type: text/xml\r\n\
+        				\r\n\
+        				{}",
+        					xml_content.len(),
+        					xml_content
+        				).unwrap();
 
-				match stream.write_all(response.as_slice()) {
-					Ok(_) => return,
-					Err(err) => {
-						eprintln!("Error sending response: {}", err);
-						return;
-					}
-				}
-        }
-        "X_MS_MediaReceiverRegistrar.xml" => {
-            let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>IsAuthorized</name><argumentList><argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument></argumentList></action><action><name>IsValidated</name><argumentList><argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument><argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument></argumentList></action><action><name>RegisterDevice</name><argumentList><argument><name>RegistrationReqMsg</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_RegistrationReqMsg</relatedStateVariable></argument><argument><name>RegistrationRespMsg</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RegistrationRespMsg</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_DeviceID</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RegistrationReqMsg</name><dataType>bin.base64</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RegistrationRespMsg</name><dataType>bin.base64</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Result</name><dataType>int</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>AuthorizationDeniedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>AuthorizationGrantedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>ValidationRevokedUpdateID</name><dataType>ui4</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>ValidationSucceededUpdateID</name><dataType>ui4</dataType></stateVariable></serviceStateTable></scpd>";
+        				match stream.write_all(response.as_slice()) {
+        					Ok(_) => return,
+        					Err(err) => {
+        						eprintln!("Error sending response: {}", err);
+        						return;
+        					}
+        				}
+                }
+                "X_MS_MediaReceiverRegistrar.xml" => {
+                            let xml_content = X_MS_MEDIA_RECEIVER_REGISTRAR_XML;
             
-            let mut response = Vec::new();
+                            let mut response = Vec::new();
 
-			write!(
-				response,
-				"HTTP/1.1 200 OK\r\n\
-			Content-Length: {}\r\n\
-			Content-Type: text/xml\r\n\
-			\r\n\
-			{}",
-				xml_content.len(),
-				xml_content
-			).unwrap();
+                			write!(
+                				response,
+                				"HTTP/1.1 200 OK\r\n\
+                			Content-Length: {}\r\n\
+                			Content-Type: text/xml\r\n\
+                			\r\n\
+                			{}",
+                				xml_content.len(),
+                				xml_content
+                			).unwrap();
 
-			match stream.write_all(response.as_slice()) {
-				Ok(_) => return,
-				Err(err) => {
-					eprintln!("Error sending response: {}", err);
-					return;
-				}
-			}
-        }
-        "ConnectionMgr.xml" => {
-            let xml_content = "<?xml version=\"1.0\"?><scpd xmlns=\"urn:schemas-upnp-org:service-1-0\"><specVersion><major>1</major><minor>0</minor></specVersion><actionList><action><name>GetProtocolInfo</name><argumentList><argument><name>Source</name><direction>out</direction><relatedStateVariable>SourceProtocolInfo</relatedStateVariable></argument><argument><name>Sink</name><direction>out</direction><relatedStateVariable>SinkProtocolInfo</relatedStateVariable></argument></argumentList></action><action><name>GetCurrentConnectionIDs</name><argumentList><argument><name>ConnectionIDs</name><direction>out</direction><relatedStateVariable>CurrentConnectionIDs</relatedStateVariable></argument></argumentList></action><action><name>GetCurrentConnectionInfo</name><argumentList><argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument><argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument><argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument><argument><name>ProtocolInfo</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument><argument><name>PeerConnectionManager</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument><argument><name>PeerConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument><argument><name>Direction</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument><argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument></argumentList></action></actionList><serviceStateTable><stateVariable sendEvents=\"yes\"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"yes\"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType><allowedValueList><allowedValue>OK</allowedValue><allowedValue>ContentFormatMismatch</allowedValue><allowedValue>InsufficientBandwidth</allowedValue><allowedValue>UnreliableChannel</allowedValue><allowedValue>Unknown</allowedValue></allowedValueList></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionManager</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType><allowedValueList><allowedValue>Input</allowedValue><allowedValue>Output</allowedValue></allowedValueList></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ProtocolInfo</name><dataType>string</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable><stateVariable sendEvents=\"no\"><name>A_ARG_TYPE_RcsID</name><dataType>i4</dataType></stateVariable></serviceStateTable></scpd>";
-	    let mut response = Vec::new();
+                			match stream.write_all(response.as_slice()) {
+                				Ok(_) => return,
+                				Err(err) => {
+                					eprintln!("Error sending response: {}", err);
+                					return;
+                				}
+                			}
+                        }
+                        "ConnectionMgr.xml" => {
+                                    let xml_content = CONNECTION_MGR_XML;
+                        	        let mut response = Vec::new();
 
-			write!(
-				response,
-				"HTTP/1.1 200 OK\r\n\
-			Content-Length: {}\r\n\
-			Content-Type: text/xml\r\n\
-			\r\n\
-			{}",
-				xml_content.len(),
-				xml_content
-			).unwrap();
+                        			write!(
+                        				response,
+                        				"HTTP/1.1 200 OK\r\n\
+                        			Content-Length: {}\r\n\
+                        			Content-Type: text/xml\r\n\
+                        			\r\n\
+                        			{}",
+                        				xml_content.len(),
+                        				xml_content
+                        			).unwrap();
 
-			match stream.write_all(response.as_slice()) {
-				Ok(_) => return,
-				Err(err) => {
-					eprintln!("Error sending response: {}", err);
-					return;
-				}
-			}
-        }
-        "rootDesc.xml" => {
-            let xml_content = format!(
-                r#"<?xml version="1.0"?>
-                <root xmlns="urn:schemas-upnp-org:device-1-0">
-                    <specVersion>
-                        <major>1</major>
-                        <minor>0</minor>
-                    </specVersion>
-                    <device>
-                        <deviceType>urn:schemas-upnp-org:device:MediaServer:1</deviceType>
-                        <friendlyName>{}</friendlyName>
-                        <manufacturer>{}</manufacturer>
-                        <manufacturerURL>http://www.netgear.com/</manufacturerURL>
-                        <modelDescription>{} on Linux</modelDescription>
-                        <modelName>Windows Media Connect compatible ({})</modelName>
-                        <modelNumber>1.3.0</modelNumber>
-                        <modelURL>http://www.netgear.com</modelURL>
-                        <serialNumber>00000000</serialNumber>
-                        <UDN>uuid:4d696e69-444c-164e-9d41-b827eb96c6c2</UDN>
-                        <dlna:X_DLNADOC xmlns:dlna="urn:schemas-dlna-org:device-1-0">DMS-1.50</dlna:X_DLNADOC>
-                        <presentationURL>/</presentationURL>
-                        <iconList>
-                            <icon><mimetype>image/png</mimetype><width>48</width><height>48</height><depth>24</depth><url>/icons/sm.png</url></icon>
-                            <icon><mimetype>image/png</mimetype><width>120</width><height>120</height><depth>24</depth><url>/icons/lrg.png</url></icon>
-                            <icon><mimetype>image/jpeg</mimetype><width>48</width><height>48</height><depth>24</depth><url>/icons/sm.jpg</url></icon>
-                            <icon><mimetype>image/jpeg</mimetype><width>120</width><height>120</height><depth>24</depth><url>/icons/lrg.jpg</url></icon>
-                        </iconList>
-                        <serviceList>
-                            <service>
-                                <serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>
-                                <serviceId>urn:upnp-org:serviceId:ContentDirectory</serviceId>
-                                <controlURL>/ctl/ContentDir</controlURL>
-                                <eventSubURL>/evt/ContentDir</eventSubURL>
-                                <SCPDURL>/ContentDir.xml</SCPDURL>
-                            </service>
-                            <service>
-                                <serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>
-                                <serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>
-                                <controlURL>/ctl/ConnectionMgr</controlURL>
-                                <eventSubURL>/evt/ConnectionMgr</eventSubURL>
-                                <SCPDURL>/ConnectionMgr.xml</SCPDURL>
-                            </service>
-                            <service>
-                                <serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType>
-                                <serviceId>urn:microsoft.com:serviceId:X_MS_MediaReceiverRegistrar</serviceId>
-                                <controlURL>/ctl/X_MS_MediaReceiverRegistrar</controlURL>
-                                <eventSubURL>/evt/X_MS_MediaReceiverRegistrar</eventSubURL>
-                                <SCPDURL>/X_MS_MediaReceiverRegistrar.xml</SCPDURL>
-                            </service>
-                        </serviceList>
-                    </device>
-                </root>"#,
-                name, name, name, name // Use the provided name
-            );
-            let mut response = Vec::new();
+                        			match stream.write_all(response.as_slice()) {
+                        				Ok(_) => return,
+                        				Err(err) => {
+                        					eprintln!("Error sending response: {}", err);
+                        					return;
+                        				}
+                        			}
+                                }
+                                "rootDesc.xml" => {
+                                            let xml_content = ROOT_DESC_XML;
+                                            let mut response = Vec::new();
 
-			write!(
-				response,
-				"HTTP/1.1 200 OK\r\n\
-			Content-Length: {}\r\n\
-			Content-Type: text/xml\r\n\
-			\r\n\
-			{}",
-				xml_content.len(),
-				xml_content
-			).unwrap();
+                                			write!(
+                                				response,
+                                				"HTTP/1.1 200 OK\r\n\
+                                			Content-Length: {}\r\n\
+                                			Content-Type: text/xml\r\n\
+                                			\r\n\
+                                			{}",
+                                				xml_content.len(),
+                                				xml_content
+                                			).unwrap();
 
-			match stream.write_all(response.as_slice()) {
-				Ok(_) => return,
-				Err(err) => {
-					eprintln!("Error sending response: {}", err);
-					return;
-				}
-			}
-        }
+                                			match stream.write_all(response.as_slice()) {
+                                				Ok(_) => return,
+                                				Err(err) => {
+                                					eprintln!("Error sending response: {}", err);
+                                					return;
+                                				}
+                                			}
+                                        }
         _ => match File::open(&combined_path) {
             Ok(file) => file,
             Err(err) => {
@@ -469,7 +423,7 @@ fn handle_post_request(
     println!("Request: {}", request);
     
     let contains_get_sort_capabilities = request.contains("#GetSortCapabilities");
-    let xml_content = "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:GetSortCapabilitiesResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><SortCaps>dc:title,dc:date,upnp:class,upnp:album,upnp:episodeNumber,upnp:originalTrackNumber</SortCaps></u:GetSortCapabilitiesResponse></s:Body></s:Envelope>";
+    let xml_content = GET_SORT_CAPABILITIES_RESPONSE_XML;
 
     let mut response = Vec::new();
     write!(
@@ -625,10 +579,10 @@ fn generate_meta_response(path: &str, ip_address: String) -> String { // Add ip_
     // Hardcoded Date header and XML content as specified.
     let date_header = "Fri, 08 Nov 2024 05:39:08 GMT";
     let result_xml = format!(
-        r#"&lt;DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"&gt;&lt;item id="64$0" parentID="64" restricted="1"&gt;&lt;dc:title&gt;&lt;/dc:title&gt;&lt;upnp:class&gt;object.item.videoItem&lt;/upnp:class&gt;&lt;dc:date&gt;2024-11-07T21:38:51&lt;/dc:date&gt;&lt;upnp:playbackCount&gt;0&lt;/upnp:playbackCount&gt;&lt;res size="21397012" duration="0:01:00.019" resolution="3840x2160" protocolInfo="http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"&gt;http://{}:8200/{}&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#,
-        ip_address, // Use ip_address
-	path
-    );
+               include_str!("meta_response_result.xml"), // Directly use include_str! here
+               ip_address, // Use ip_address
+       	    path
+           );
 	println!("{}", result_xml);
     // Concatenate all parts into a single string.
     let response = format!(
