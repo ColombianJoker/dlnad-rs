@@ -26,7 +26,7 @@ const X_MS_MEDIA_RECEIVER_REGISTRAR_XML: &str = include_str!("X_MS_MediaReceiver
 const CONNECTION_MGR_XML: &str = include_str!("ConnectionMgr.xml");
 const ROOT_DESC_XML: &str = include_str!("rootDesc.xml");
 const GET_SORT_CAPABILITIES_RESPONSE_XML: &str = include_str!("get_sort_capabilities_response.xml");
-const META_RESPONSE_RESULT_XML_TEMPLATE: &str = include_str!("meta_response_result.xml");
+// Removed: const META_RESPONSE_RESULT_XML_TEMPLATE: &str = include_str!("meta_response_result.xml");
 
 // Define a struct to parse command-line arguments
 #[derive(Parser, Debug)]
@@ -194,16 +194,16 @@ fn handle_head_request(mut stream: TcpStream) {
     let date_header = "Date: Fri, 08 Nov 2024 05:39:08 GMT\r\n";
     let ext_header = "EXT:\r\n\r\n";
 
-    stream.write_all(format!("{}{}{}{}{}", response, content_type, content_length, date_header, ext_header).as_bytes());
+    let _ = stream.write_all(format!("{}{}{}{}{}", response, content_type, content_length, date_header, ext_header).as_bytes()); // Added `let _ =` here
 
 }
 
 
 
 
-fn handle_get_request(mut stream: TcpStream, http_request: &str, ip_address: String, directory: String, name: String) { // Add ip_address, directory, and name
+fn handle_get_request(mut stream: TcpStream, http_request: &str, _ip_address: String, directory: String, _name: String) { // Added `_` to ip_address and name
     let mut http_request_parts = http_request.split_whitespace();
-    let http_method = match http_request_parts.next() {
+    let _http_method = match http_request_parts.next() { // Added `_` to http_method
         Some(method) => method,
         None => {
             eprintln!("Malformed HTTP request: missing method");
@@ -499,7 +499,7 @@ fn handle_post_request(
 
     let mut cache = match cache.lock() {
         Ok(locked_cache) => locked_cache,
-        Err(poisoned) => {
+        Err(_poisoned) => { // Added `_` to poisoned
             eprintln!("Mutex poisoned. Could not acquire lock.");
             return; // Or handle as needed
         }
@@ -509,7 +509,7 @@ fn handle_post_request(
     let cached_response = cache.get(object_id);
     match cached_response {
         Some(cached_response) => {
-            stream.write_all(cached_response).map_err(|err| eprintln!("Error sending response: {}", err));
+            let _ = stream.write_all(cached_response).map_err(|err| eprintln!("Error sending response: {}", err)); // Added `let _ =` here
             return;
         }
         None => {
@@ -520,13 +520,7 @@ fn handle_post_request(
                 },
                 false => {
                     // Continue with the rest of the logic if object_id is not empty
-                    let object_id_stripped = object_id
-                        .strip_prefix("64$")
-                        .unwrap_or(object_id)
-                        .strip_prefix("0")
-                        .unwrap_or(object_id);
-
-                    // You can continue processing the object_id_stripped here...
+                    // The `object_id_stripped` below is the one actually used, so we remove the unused one here.
                 }
             }
             let object_id_stripped = object_id.strip_prefix("64$").unwrap_or(object_id).strip_prefix("0").unwrap_or(object_id);
@@ -553,7 +547,7 @@ fn handle_post_request(
                 println!("Added ObjectID {} (folder) to cache.", object_id);
 
                 // Write the response to the stream.
-                stream.write_all(response_bytes).map_err(|err| eprintln!("Error sending response: {}", err));
+                let _ = stream.write_all(response_bytes).map_err(|err| eprintln!("Error sending response: {}", err)); // Added `let _ =` here
                 return;
             } else if path.is_file() {
                 println!("It's a file {}", path.display());
@@ -562,7 +556,7 @@ fn handle_post_request(
                 let response_bytes = meta_response.as_bytes(); // Convert the metadata response to bytes.
 
                 // Write the response to the stream.
-                stream.write_all(response_bytes).map_err(|err| eprintln!("Error sending response: {}", err));
+                let _ = stream.write_all(response_bytes).map_err(|err| eprintln!("Error sending response: {}", err)); // Added `let _ =` here
                 return;
             } else {
                 // Handle the case where the object is neither a folder nor a file (e.g., symbolic link, invalid path, etc.).
@@ -579,10 +573,10 @@ fn generate_meta_response(path: &str, ip_address: String) -> String { // Add ip_
     // Hardcoded Date header and XML content as specified.
     let date_header = "Fri, 08 Nov 2024 05:39:08 GMT";
     let result_xml = format!(
-               include_str!("meta_response_result.xml"), // Directly use include_str! here
-               ip_address, // Use ip_address
-       	    path
-           );
+            include_str!("meta_response_result.xml"), // Corrected usage as discussed previously
+            ip_address, // Use ip_address
+    	    path
+        );
 	println!("{}", result_xml);
     // Concatenate all parts into a single string.
     let response = format!(
@@ -625,7 +619,7 @@ fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &
                 }
             }
         }
-        Err(err) => println!("Error reading directory: {}", combined_path),
+        Err(_err) => println!("Error reading directory: {}", combined_path), // Added `_` to err
     }
 
     let mut loop_count = 0;
