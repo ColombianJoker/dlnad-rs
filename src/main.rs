@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use std::time::Duration;
 use clap::Parser; // Add this line to import Parser from clap
+use gethostname::gethostname; // Import gethostname
 
 const NUM_THREADS: i32 = 64; // Number of threads on the thread pool
 const CONTENT_DIR_XML: &str = include_str!("ContentDir.xml");
@@ -26,7 +27,6 @@ const X_MS_MEDIA_RECEIVER_REGISTRAR_XML: &str = include_str!("X_MS_MediaReceiver
 const CONNECTION_MGR_XML: &str = include_str!("ConnectionMgr.xml");
 const ROOT_DESC_XML: &str = include_str!("rootDesc.xml");
 const GET_SORT_CAPABILITIES_RESPONSE_XML: &str = include_str!("get_sort_capabilities_response.xml");
-// Removed: const META_RESPONSE_RESULT_XML_TEMPLATE: &str = include_str!("meta_response_result.xml");
 
 // Define a struct to parse command-line arguments
 #[derive(Parser, Debug)]
@@ -44,18 +44,26 @@ struct Cli {
     #[arg(short = 'd', long = "directory", default_value = ".")]
     directory: String,
 
-    /// Name of the DLNA server to be shown to clients
-    #[arg(short, long, default_value = "RustyDLNA")]
-    name: String,
+    /// Name of the DLNA server to be shown to clients. Defaults to the computer's hostname.
+    #[arg(short, long)] // Removed default_value_t
+    name: Option<String>, // Changed to Option<String>
 }
 
 fn main() {
     let cli = Cli::parse(); // Parse the command-line arguments
 
+    // Determine the server name: use provided name, or fallback to hostname, or a generic default
+    let server_name = match cli.name {
+        Some(name) => name,
+        None => {
+            gethostname().into_string().unwrap_or_else(|_| "RustyDLNA".to_string())
+        }
+    };
+
     let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     // Use the parsed port from the CLI arguments
     let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port)).unwrap();
-    println!("DLNA server listening on port {}", cli.port);
+    println!("DLNA server '{}' listening on port {}", server_name, cli.port);
 
     let ssdp_socket = UdpSocket::bind("0.0.0.0:1900").unwrap();
     let multicast_addr = "239.255.255.250".parse().unwrap();
@@ -74,7 +82,7 @@ fn main() {
         \r\n",
         cli.ip_address, // Use cli.ip_address
         cli.port, // Use the parsed port here as well
-        cli.name // Use the provided server name
+        server_name // Use the determined server_name here
     ).unwrap();
     let mut buffer = [0; 4096];
 
@@ -103,13 +111,13 @@ fn main() {
         let cache = Arc::clone(&cache);
         let ip_address_clone = cli.ip_address.clone(); // Clone ip_address for the thread
         let directory_clone = cli.directory.clone(); // Clone directory for the thread
-        let name_clone = cli.name.clone(); // Clone name for the thread
+        // Removed: let name_clone = cli.name.clone(); // No longer need to clone name for handle_client
 
         thread::spawn(move || {
             loop {
                 let stream = rx.lock().unwrap().recv().unwrap();
                 // Handle each TCP connection
-                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone(), name_clone.clone()); // Pass ip_address, directory, and name
+                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone()); // Removed name parameter
             }
         });
     }
@@ -127,7 +135,7 @@ fn main() {
     }
 }
 
-fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String, name: String) { // Add ip_address, directory, and name
+fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String) { // Removed name parameter
 	
     let mut buffer = Vec::new();
     let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
@@ -172,7 +180,7 @@ fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>
         false => match std::str::from_utf8(&buffer) {
             Ok(request) => match request.split_whitespace().next() {
                 Some(method) => match method.to_uppercase().as_str() {
-                    "GET" => handle_get_request(stream, request, ip_address, directory, name), // Pass ip_address, directory, and name
+                    "GET" => handle_get_request(stream, request, ip_address, directory), // Removed name parameter
                     "HEAD" => handle_head_request(stream),
                     "POST" => handle_post_request(stream, request.to_string(), cache, ip_address, directory), // Pass ip_address and directory
                     _ => eprintln!("Unsupported HTTP method: {}", method),
@@ -201,7 +209,7 @@ fn handle_head_request(mut stream: TcpStream) {
 
 
 
-fn handle_get_request(mut stream: TcpStream, http_request: &str, _ip_address: String, directory: String, _name: String) { // Added `_` to ip_address and name
+fn handle_get_request(mut stream: TcpStream, http_request: &str, _ip_address: String, directory: String) { // Removed _name parameter
     let mut http_request_parts = http_request.split_whitespace();
     let _http_method = match http_request_parts.next() { // Added `_` to http_method
         Some(method) => method,
