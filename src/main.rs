@@ -65,7 +65,7 @@ fn main() {
     let server_name = match cli.name {
         Some(name) => name,
         None => {
-            gethostname().into_string().unwrap_or_else(|_| "RustyDLNA".to_string())
+            gethostname().into_string().unwrap_or_else(|_| "Hermes".to_string())
         }
     };
 
@@ -117,11 +117,12 @@ fn main() {
         let cache = Arc::clone(&cache);
         let ip_address_clone = cli.ip_address.clone();
         let directory_clone = cli.directory.clone();
+        let server_name_clone = server_name.clone(); // Clone for each thread
 
         thread::spawn(move || {
             loop {
                 let stream = rx.lock().unwrap().recv().unwrap();
-                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone());
+                handle_client(stream, cache.clone(), ip_address_clone.clone(), directory_clone.clone(), server_name_clone.clone());
             }
         });
     }
@@ -138,7 +139,7 @@ fn main() {
     }
 }
 
-fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String) {
+fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>>>>, ip_address: String, directory: String, server_name: String) {
     let mut buffer = Vec::new();
     let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(5000)));
@@ -177,7 +178,7 @@ fn handle_client(mut stream: TcpStream, cache: Arc<Mutex<HashMap<String, Vec<u8>
                 Some(method) => match method.to_uppercase().as_str() {
                     "GET" => handle_get_request(stream, request, ip_address, directory),
                     "HEAD" => handle_head_request(stream),
-                    "POST" => handle_post_request(stream, request.to_string(), cache, ip_address, directory),
+                    "POST" => handle_post_request(stream, request.to_string(), cache, ip_address, directory, server_name),
                     _ => warn!("Unsupported HTTP method: {}", method),
                 },
                 None => warn!("Malformed HTTP request: missing method"),
@@ -416,6 +417,7 @@ fn handle_post_request(
     cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     ip_address: String,
     directory: String,
+    server_name: String,
 ) {
     debug!("Request: {}", request);
     
@@ -527,6 +529,7 @@ fn handle_post_request(
                     &requested_count,
                     ip_address,
                     directory,
+                    server_name,
                 );
                 let response_bytes = browse_response.as_bytes();
 
@@ -537,7 +540,7 @@ fn handle_post_request(
                 return;
             } else if path.is_file() {
                 debug!("It's a file {}", path.display());
-                let meta_response = generate_meta_response(object_id, ip_address);
+                let meta_response = generate_meta_response(object_id, ip_address, server_name);
                 let response_bytes = meta_response.as_bytes();
 
                 let _ = stream.write_all(response_bytes).map_err(|err| error!("Error sending response: {}", err));
@@ -550,7 +553,7 @@ fn handle_post_request(
     }
 }
 
-fn generate_meta_response(path: &str, ip_address: String) -> String {
+fn generate_meta_response(path: &str, ip_address: String, server_name: String) -> String {
     let date_header = "Fri, 08 Nov 2024 05:39:08 GMT";
     let result_xml = fmt::format(format_args!(
             include_str!("meta_response_result.xml"), // Direct use of include_str!
@@ -560,7 +563,8 @@ fn generate_meta_response(path: &str, ip_address: String) -> String {
 	debug!("Result XML: {}", result_xml);
 
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nConnection: close\r\nContent-Length: 2048\r\nServer: Debian DLNADOC/1.50 UPnP/1.0 MiniDLNA/1.3.0\r\nDate: {}\r\nEXT:\r\n\r\n<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nConnection: close\r\nContent-Length: 2048\r\nServer: DLNADOC/1.50 UPnP/1.0 {}/1.3.0\r\nDate: {}\r\nEXT:\r\n\r\n<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
+        server_name,
         date_header,
         result_xml
     );
@@ -568,7 +572,7 @@ fn generate_meta_response(path: &str, ip_address: String) -> String {
     response
 }
 
-fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &u32, ip_address: String, directory: String) -> String {
+fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &u32, ip_address: String, directory: String, server_name: String) -> String {
     let combined_path = format!("{}/{}", directory, &decode(path));
     let mut soap_response = String::with_capacity(1024);
     let mut count = 0;
@@ -659,7 +663,8 @@ fn generate_browse_response(path: &str, starting_index: &u32, requested_count: &
     );
 
     let soap_response_size = soap_response.len();
-    format!("HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\nContent-Type: text/xml;\r\nContent-Length: {}\r\nServer: RustyDLNA DLNADOC/1.50 UPnP/1.0 RustyDLNA6/1.3.0\r\n\r\n{}", soap_response_size, soap_response)
+    // Use server_name in the Server header here
+    format!("HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\nContent-Type: text/xml;\r\nContent-Length: {}\r\nServer: DLNADOC/1.50 UPnP/1.0 {}/1.3.0\r\n\r\n{}", soap_response_size, server_name, soap_response)
 }
 
 fn decode(s: &str) -> String {
@@ -693,7 +698,7 @@ fn encode(s: &str) -> String {
     encoded = encoded.replace('\u{2019}', "%E2%80%99");
     encoded = encoded.replace('&', "&amp;amp;");
     encoded = encoded.replace('\u{00E1}', "%C3%A1");
-    encoded = encoded.replace('\u{00E9}', "%C3{A9}");
+    encoded = encoded.replace('\u{00E9}', "%C3%A9");
     encoded
 }
 fn encode_title_name(s: &str) -> String {
