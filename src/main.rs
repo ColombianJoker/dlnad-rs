@@ -21,7 +21,6 @@ const CONNECTION_MGR_XML: &str = include_str!("ConnectionMgr.xml");
 const ROOT_DESC_XML: &str = include_str!("rootDesc.xml");
 const GET_SORT_CAPABILITIES_RESPONSE_XML: &str = include_str!("get_sort_capabilities_response.xml");
 const SSDP_PORT: i32 = 1900;
-
 const DLNA_FEATURES: &str =
     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
@@ -423,9 +422,11 @@ fn generate_browse_response(
 fn decode(s: &str) -> String {
     s.replace("%20", " ").replace("&amp;", "&")
 }
+
 fn encode(s: &str) -> String {
     s.replace(' ', "%20").replace('&', "&amp;")
 }
+
 fn encode_title_name(s: &str) -> String {
     s.replace('&', "&amp;")
 }
