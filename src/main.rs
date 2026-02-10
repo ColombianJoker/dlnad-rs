@@ -336,22 +336,27 @@ fn generate_browse_response(
     _server_name: String,
 ) -> String {
     let mut didl_raw = String::from(
-        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
+        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+        xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" \
+        xmlns:sec=\"http://www.sec.co.kr/\" \
+        xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
     );
+
     let relative_dir = if path == "0" {
         "".to_string()
     } else {
         decode(path)
     };
     let full_path = Path::new(&directory).join(&relative_dir);
-    let mut entries = Vec::new();
 
+    let mut entries = Vec::new();
     if let Ok(dir) = fs::read_dir(full_path) {
         for entry in dir.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
             }
+
             let entry_path = entry.path();
             let is_dir = entry_path.is_dir();
             let ext = entry_path
@@ -359,6 +364,7 @@ fn generate_browse_response(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
+
             if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
                 entries.push((name, is_dir, entry_path));
             }
@@ -367,6 +373,7 @@ fn generate_browse_response(
 
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let total_matches = entries.len();
+
     let slice = entries
         .iter()
         .skip(start_index)
@@ -389,8 +396,10 @@ fn generate_browse_response(
         let mut display_artist = String::new();
         let mut display_desc = String::new();
         let mut duration_str = String::new();
+        let mut subtitle_xml = String::new();
 
         if !*is_dir {
+            // Metadata Extraction
             if let Ok(tag) = Tag::read_from_path(entry_path) {
                 if let Some(t) = tag.title() {
                     display_title = encode_title_name(t);
@@ -402,20 +411,56 @@ fn generate_browse_response(
                     "<dc:description>{}</dc:description>",
                     encode_title_name(name)
                 );
-                // Tag::duration() returns a Duration structure, not an Option
                 let d = tag.duration();
                 duration_str = format!(" duration=\"{}\"", format_duration(d.as_secs()));
+            }
+
+            // Subtitle Detection
+            let srt_path = entry_path.with_extension("srt");
+            let vtt_path = entry_path.with_extension("vtt");
+
+            let (sub_path, sub_mime) = if srt_path.exists() {
+                (Some(srt_path), "text/srt")
+            } else if vtt_path.exists() {
+                (Some(vtt_path), "text/vtt")
+            } else {
+                (None, "")
+            };
+
+            if let Some(p) = sub_path {
+                let sub_name = p.file_name().unwrap().to_string_lossy();
+                let sub_child_id = if relative_dir.is_empty() {
+                    sub_name.into_owned()
+                } else {
+                    format!("{}/{}", relative_dir, sub_name)
+                };
+                let sub_url = format!("http://{}:8200/{}", ip_address, encode(&sub_child_id));
+
+                // Add secondary resource and LG-specific caption tag
+                subtitle_xml = format!(
+                    "<res protocolInfo=\"http-get:*:{} :*\">{}</res>\
+                     <sec:CaptionInfoEx xmlns:sec=\"http://www.sec.co.kr/\">{}</sec:CaptionInfoEx>",
+                    sub_mime, sub_url, sub_url
+                );
             }
         }
 
         if *is_dir {
             didl_raw += &format!(
-                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>",
+                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\">\
+                 <dc:title>{}</dc:title>\
+                 <upnp:class>object.container.storageFolder</upnp:class>\
+                 </container>",
                 encoded_id, path, display_title
             );
         } else {
             didl_raw += &format!(
-                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\"><dc:title>{}</dc:title>{}{}<upnp:class>object.item.videoItem</upnp:class><res protocolInfo=\"http-get:*:video/mp4:{}\"{} >http://{}:8200/{}</res></item>",
+                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
+                 <dc:title>{}</dc:title>{}{}\
+                 <upnp:class>object.item.videoItem</upnp:class>\
+                 <res protocolInfo=\"http-get:*:video/mp4:{}\"{}>http://{}:8200/{}</res>\
+                 {}\
+                 </item>",
                 encoded_id,
                 path,
                 display_title,
@@ -424,12 +469,14 @@ fn generate_browse_response(
                 DLNA_FEATURES,
                 duration_str,
                 ip_address,
-                encoded_id
+                encoded_id,
+                subtitle_xml
             );
         }
         returned_count += 1;
     }
     didl_raw += "</DIDL-Lite>";
+
     let escaped_didl = didl_raw
         .replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -438,7 +485,18 @@ fn generate_browse_response(
         .replace("'", "&apos;");
 
     format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+        <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
+        s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\
+        <s:Body>\
+        <u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">\
+        <Result>{}</Result>\
+        <NumberReturned>{}</NumberReturned>\
+        <TotalMatches>{}</TotalMatches>\
+        <UpdateID>1</UpdateID>\
+        </u:BrowseResponse>\
+        </s:Body>\
+        </s:Envelope>",
         escaped_didl, returned_count, total_matches
     )
 }
