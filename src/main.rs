@@ -25,10 +25,14 @@ const DLNA_FEATURES: &str =
     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
 #[derive(Parser, Debug)]
-#[command(author,
-    version = env!("BUILD_VERSION"),
-    about,
-    long_about = None)]
+#[command(
+        author,
+        version = env!("BUILD_VERSION"),
+        about = "Gunther: A simple DLNA server for LG WebOS",
+        long_about = None,
+        // This template ensures the version is printed in the help output
+        help_template = "{bin} {version}\n{author-with-newline}{about-section}\n{usage-heading} {usage}\n\n{all-args}\n{after-help}"
+    )]
 struct Cli {
     #[arg(short, long, default_value_t = 8200)]
     port: u16,
@@ -69,12 +73,16 @@ fn main() {
             .unwrap_or_else(|_| "Gunther".to_string()),
     };
 
+    info!(
+        "DLNA server {} (version {}) listening on {}:{}",
+        server_name,
+        env!("BUILD_VERSION"),
+        server_ip,
+        cli.port
+    );
+
     let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port)).unwrap();
-    info!(
-        "DLNA server {} listening on {}:{}",
-        server_name, server_ip, cli.port
-    );
 
     let ssdp_socket = UdpSocket::bind(format!("0.0.0.0:{}", SSDP_PORT)).unwrap();
     let multicast_addr = "239.255.255.250".parse().unwrap();
@@ -84,7 +92,7 @@ fn main() {
         .unwrap();
 
     let mut ssdp_response = Vec::new();
-    write!(ssdp_response, "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nLOCATION: http://{}:{}/rootDesc.xml\r\nSERVER: UPnP/1.0 DLNADOC/1.50 Gunther/1.3.0\r\nST: urn:schemas-upnp-org:device:MediaServer:1\r\nUSN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n", server_ip, cli.port).unwrap();
+    write!(ssdp_response, "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nLOCATION: http://{}:{}/rootDesc.xml\r\nSERVER: UPnP/1.0 DLNADOC/1.50 Gunther/{}\r\nST: urn:schemas-upnp-org:device:MediaServer:1\r\nUSN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n", server_ip, cli.port, env!("BUILD_VERSION")).unwrap();
 
     let ssdp_socket_clone = ssdp_socket.try_clone().unwrap();
     thread::spawn(move || {
@@ -192,12 +200,10 @@ fn handle_get_request(
     server_name: String,
     debug: bool,
 ) {
-    let raw_path = http_request.split_whitespace().nth(1).unwrap_or("/");
-    let path = decode(raw_path);
+    let path = decode(http_request.split_whitespace().nth(1).unwrap_or("/"));
     let trimmed_path = path.trim_start_matches(['.', '/']);
     let combined_path = format!("{}/{}", directory, path);
 
-    // Serve XML Description Files
     match trimmed_path {
         "rootDesc.xml"
         | "ContentDir.xml"
@@ -213,10 +219,7 @@ fn handle_get_request(
                 _ => X_MS_MEDIA_RECEIVER_REGISTRAR_XML.to_string(),
             };
             let header = format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Length: {}\r\n\
-                 Content-Type: text/xml\r\n\
-                 Connection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n",
                 content.len()
             );
             if debug {
@@ -229,25 +232,23 @@ fn handle_get_request(
         _ => (),
     }
 
-    // Serve Media and Subtitles
     if let Ok(file) = File::open(&combined_path) {
         let file_size = file.metadata().unwrap().len();
         let mut start_range = 0;
-
         let ext = Path::new(&combined_path)
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
 
-        // 1. Correct MIME mapping for LG compatibility
         let mime_type = match ext.as_str() {
             "vtt" => "text/vtt",
             "srt" => "text/srt",
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
             _ => "video/mp4",
         };
 
-        // 2. Specialized headers for Subtitles
         let mut extra_headers = String::new();
         if ext == "vtt" || ext == "srt" {
             let safe_path = encode(path.trim_start_matches('/'));
@@ -260,7 +261,6 @@ fn handle_get_request(
             );
         }
 
-        // Handle Byte Range Requests for seeking
         if let Some(line) = http_request
             .lines()
             .find(|l| l.starts_with("Range: bytes="))
@@ -274,14 +274,13 @@ fn handle_get_request(
             }
         }
 
-        // 3. Construct the final header with strict double CRLF
         let header = format!(
             "HTTP/1.1 {} Partial Content\r\n\
-             Content-Range: bytes {}-{}/{}\r\n\
-             Content-Type: {}\r\n\
-             Content-Length: {}\r\n\
-             Accept-Ranges: bytes\r\n\
-             {}Connection: close\r\n\r\n", // CRITICAL: The double \r\n\r\n terminates headers
+            Content-Range: bytes {}-{}/{}\r\n\
+            Content-Type: {}\r\n\
+            Content-Length: {}\r\n\
+            Accept-Ranges: bytes\r\n\
+            {}Connection: close\r\n\r\n",
             if start_range > 0 { "206" } else { "200" },
             start_range,
             file_size - 1,
@@ -294,7 +293,6 @@ fn handle_get_request(
         if debug {
             info!("DEBUG RESPONSE HEADERS:\n{}", header);
         }
-
         let _ = stream.write_all(header.as_bytes());
         let mut file = file;
         let _ = file.seek(SeekFrom::Start(start_range));
@@ -371,9 +369,10 @@ fn handle_post_request(
     };
 
     let header = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\nEXT:\r\nServer: {}/1.3.0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\nEXT:\r\nServer: {}/{}\r\n\r\n",
         response_body.len(),
-        server_name
+        server_name,
+        env!("BUILD_VERSION")
     );
     if debug {
         info!("DEBUG RESPONSE HEADERS:\n{}", header);
@@ -398,20 +397,16 @@ fn generate_browse_response(
     _server_name: String,
 ) -> String {
     let mut didl_raw = String::from(
-        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
-        xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" \
-        xmlns:sec=\"http://www.sec.co.kr/\" \
-        xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
+        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:sec=\"http://www.sec.co.kr/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
     );
-
     let relative_dir = if path == "0" {
         "".to_string()
     } else {
         decode(path)
     };
     let full_path = Path::new(&directory).join(&relative_dir);
-
     let mut entries = Vec::new();
+
     if let Ok(dir) = fs::read_dir(full_path) {
         for entry in dir.filter_map(Result::ok) {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -425,18 +420,14 @@ fn generate_browse_response(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-
-            // Only list directories or supported video files
             if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
                 entries.push((name, is_dir, entry_path));
             }
         }
     }
 
-    // Ensure consistent pagination
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let total_matches = entries.len();
-
     let slice = entries
         .iter()
         .skip(start_index)
@@ -460,10 +451,10 @@ fn generate_browse_response(
         let mut display_desc = String::new();
         let mut duration_str = String::new();
         let mut subtitle_xml = String::new();
+        let mut thumb_xml = String::new();
         let mut video_res_attr = String::new();
 
         if !*is_dir {
-            // Metadata extraction
             if let Ok(tag) = Tag::read_from_path(entry_path) {
                 if let Some(t) = tag.title() {
                     display_title = encode_title_name(t);
@@ -479,10 +470,9 @@ fn generate_browse_response(
                 duration_str = format!(" duration=\"{}\"", format_duration(d.as_secs()));
             }
 
-            // Advanced Subtitle Detection and Linking
+            // Subtitle Detection
             let srt_path = entry_path.with_extension("srt");
             let vtt_path = entry_path.with_extension("vtt");
-
             let (sub_path, sub_mime) = if srt_path.exists() {
                 (Some(srt_path), "text/srt")
             } else if vtt_path.exists() {
@@ -499,44 +489,57 @@ fn generate_browse_response(
                     format!("{}/{}", relative_dir, sub_name)
                 };
                 let sub_url = format!("http://{}:8200/{}", ip_address, encode(&sub_child_id));
-
-                // 1. Attribute for the VIDEO res tag (PacketVideo standard)
                 video_res_attr = format!(
                     " pv:subtitleFileUri=\"{}\" xmlns:pv=\"http://www.pv.com/pvns/\"",
                     sub_url
                 );
-
-                // 2. Secondary resource tag for standard DLNA
                 subtitle_xml = format!(
                     "<res protocolInfo=\"http-get:*:{} :*\">{}</res>\
                      <sec:CaptionInfoEx xmlns:sec=\"http://www.sec.co.kr/\">{}</sec:CaptionInfoEx>",
                     sub_mime, sub_url, sub_url
                 );
             }
+
+            // Thumbnail Detection
+            let jpg_path = entry_path.with_extension("jpg");
+            let png_path = entry_path.with_extension("png");
+            let thumb_path = if jpg_path.exists() {
+                Some(jpg_path)
+            } else if png_path.exists() {
+                Some(png_path)
+            } else {
+                None
+            };
+
+            if let Some(p) = thumb_path {
+                let thumb_name = p.file_name().unwrap().to_string_lossy();
+                let thumb_child_id = if relative_dir.is_empty() {
+                    thumb_name.into_owned()
+                } else {
+                    format!("{}/{}", relative_dir, thumb_name)
+                };
+                let thumb_url = format!("http://{}:8200/{}", ip_address, encode(&thumb_child_id));
+                thumb_xml = format!(
+                    "<upnp:albumArtURI dlna:profileID=\"JPEG_TN\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">{}</upnp:albumArtURI>",
+                    thumb_url
+                );
+            }
         }
 
         if *is_dir {
             didl_raw += &format!(
-                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\">\
-                 <dc:title>{}</dc:title>\
-                 <upnp:class>object.container.storageFolder</upnp:class>\
-                 </container>",
+                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>",
                 encoded_id, path, display_title
             );
         } else {
-            // Note: video_res_attr is inserted INTO the video <res> tag
             didl_raw += &format!(
-                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
-                 <dc:title>{}</dc:title>{}{}\
-                 <upnp:class>object.item.videoItem</upnp:class>\
-                 <res protocolInfo=\"http-get:*:video/mp4:{}\"{}{}>http://{}:8200/{}</res>\
-                 {}\
-                 </item>",
+                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\"><dc:title>{}</dc:title>{}{}{}<upnp:class>object.item.videoItem</upnp:class><res protocolInfo=\"http-get:*:video/mp4:{}\"{}{}>http://{}:8200/{}</res>{}</item>",
                 encoded_id,
                 path,
                 display_title,
                 display_artist,
                 display_desc,
+                thumb_xml,
                 DLNA_FEATURES,
                 duration_str,
                 video_res_attr,
@@ -548,7 +551,6 @@ fn generate_browse_response(
         returned_count += 1;
     }
     didl_raw += "</DIDL-Lite>";
-
     let escaped_didl = didl_raw
         .replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -557,18 +559,7 @@ fn generate_browse_response(
         .replace("'", "&apos;");
 
     format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
-        <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
-        s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\
-        <s:Body>\
-        <u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">\
-        <Result>{}</Result>\
-        <NumberReturned>{}</NumberReturned>\
-        <TotalMatches>{}</TotalMatches>\
-        <UpdateID>1</UpdateID>\
-        </u:BrowseResponse>\
-        </s:Body>\
-        </s:Envelope>",
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
         escaped_didl, returned_count, total_matches
     )
 }
