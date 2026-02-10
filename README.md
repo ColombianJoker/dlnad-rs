@@ -1,4 +1,3 @@
----
 # dlnad: Simple DLNA Server for LG WebOS
 
 A lightweight DLNA media server written in Rust, specifically optimized for LG WebOS TV clients.
