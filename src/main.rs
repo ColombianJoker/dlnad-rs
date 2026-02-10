@@ -25,7 +25,10 @@ const DLNA_FEATURES: &str =
     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author,
+    version = env!("BUILD_VERSION"),
+    about,
+    long_about = None)]
 struct Cli {
     #[arg(short, long, default_value_t = 8200)]
     port: u16,
