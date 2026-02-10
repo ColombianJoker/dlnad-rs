@@ -142,7 +142,9 @@ fn handle_client(
             }
             let method = request.split_whitespace().next().unwrap_or("");
             match method {
-                "GET" => handle_get_request(stream, &request, ip_address, directory, server_name),
+                "GET" => {
+                    handle_get_request(stream, &request, ip_address, directory, server_name, debug)
+                }
                 "POST" => handle_post_request(
                     stream,
                     request.to_string(),
@@ -150,73 +152,112 @@ fn handle_client(
                     ip_address,
                     directory,
                     server_name,
+                    debug,
                 ),
-                "SUBSCRIBE" => handle_subscribe_request(stream),
-                "HEAD" => handle_head_request(stream),
+                "SUBSCRIBE" => handle_subscribe_request(stream, debug),
+                "HEAD" => handle_head_request(stream, debug),
                 _ => (),
             }
         }
     }
 }
 
-fn handle_subscribe_request(mut stream: TcpStream) {
+fn handle_subscribe_request(mut stream: TcpStream, debug: bool) {
     let response = "HTTP/1.1 200 OK\r\nSID: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2\r\nTIMEOUT: Second-300\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    if debug {
+        info!("DEBUG RESPONSE HEADERS:\n{}", response);
+    }
     let _ = stream.write_all(response.as_bytes());
 }
 
-fn handle_head_request(mut stream: TcpStream) {
+fn handle_head_request(mut stream: TcpStream, debug: bool) {
     let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: 0\r\ncontentFeatures.dlna.org: {}\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: 0\r\ncontentFeatures.dlna.org: {}\r\nConnection: close\r\n\r\n",
         DLNA_FEATURES
     );
+    if debug {
+        info!("DEBUG RESPONSE HEADERS:\n{}", response);
+    }
     let _ = stream.write_all(response.as_bytes());
 }
 
 fn handle_get_request(
     mut stream: TcpStream,
     http_request: &str,
-    _ip_address: String,
+    ip_address: String,
     directory: String,
     server_name: String,
+    debug: bool,
 ) {
-    let path = decode(http_request.split_whitespace().nth(1).unwrap_or("/"));
+    let raw_path = http_request.split_whitespace().nth(1).unwrap_or("/");
+    let path = decode(raw_path);
     let trimmed_path = path.trim_start_matches(['.', '/']);
     let combined_path = format!("{}/{}", directory, path);
 
+    // Serve XML Description Files
     match trimmed_path {
-        "rootDesc.xml" => {
-            let content = ROOT_DESC_XML.replace(
-                "<friendlyName>Gunther</friendlyName>",
-                &format!("<friendlyName>{}</friendlyName>", server_name),
-            );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n{}",
-                content.len(),
-                content
-            );
-            let _ = stream.write_all(response.as_bytes());
-            return;
-        }
-        "ContentDir.xml" | "ConnectionMgr.xml" | "X_MS_MediaReceiverRegistrar.xml" => {
+        "rootDesc.xml"
+        | "ContentDir.xml"
+        | "ConnectionMgr.xml"
+        | "X_MS_MediaReceiverRegistrar.xml" => {
             let content = match trimmed_path {
-                "ContentDir.xml" => CONTENT_DIR_XML,
-                "ConnectionMgr.xml" => CONNECTION_MGR_XML,
-                _ => X_MS_MEDIA_RECEIVER_REGISTRAR_XML,
+                "rootDesc.xml" => ROOT_DESC_XML.replace(
+                    "<friendlyName>Gunther</friendlyName>",
+                    &format!("<friendlyName>{}</friendlyName>", server_name),
+                ),
+                "ContentDir.xml" => CONTENT_DIR_XML.to_string(),
+                "ConnectionMgr.xml" => CONNECTION_MGR_XML.to_string(),
+                _ => X_MS_MEDIA_RECEIVER_REGISTRAR_XML.to_string(),
             };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n{}",
-                content.len(),
-                content
+            let header = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Length: {}\r\n\
+                 Content-Type: text/xml\r\n\
+                 Connection: close\r\n\r\n",
+                content.len()
             );
-            let _ = stream.write_all(response.as_bytes());
+            if debug {
+                info!("DEBUG RESPONSE HEADERS:\n{}", header);
+            }
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(content.as_bytes());
             return;
         }
         _ => (),
     }
 
+    // Serve Media and Subtitles
     if let Ok(file) = File::open(&combined_path) {
         let file_size = file.metadata().unwrap().len();
         let mut start_range = 0;
+
+        let ext = Path::new(&combined_path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // 1. Correct MIME mapping for LG compatibility
+        let mime_type = match ext.as_str() {
+            "vtt" => "text/vtt",
+            "srt" => "text/srt",
+            _ => "video/mp4",
+        };
+
+        // 2. Specialized headers for Subtitles
+        let mut extra_headers = String::new();
+        if ext == "vtt" || ext == "srt" {
+            let safe_path = encode(path.trim_start_matches('/'));
+            extra_headers = format!(
+                "CaptionInfo.sec: http://{}:8200/{}\r\n\
+                 ContentFeatures.dlna.org: {}\r\n",
+                ip_address,
+                safe_path,
+                "DLNA.ORG_PN=SUBTITLE;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+            );
+        }
+
+        // Handle Byte Range Requests for seeking
         if let Some(line) = http_request
             .lines()
             .find(|l| l.starts_with("Range: bytes="))
@@ -229,14 +270,28 @@ fn handle_get_request(
                     .unwrap_or(0);
             }
         }
+
+        // 3. Construct the final header with strict double CRLF
         let header = format!(
-            "HTTP/1.1 {} Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {} Partial Content\r\n\
+             Content-Range: bytes {}-{}/{}\r\n\
+             Content-Type: {}\r\n\
+             Content-Length: {}\r\n\
+             Accept-Ranges: bytes\r\n\
+             {}Connection: close\r\n\r\n", // CRITICAL: The double \r\n\r\n terminates headers
             if start_range > 0 { "206" } else { "200" },
             start_range,
             file_size - 1,
             file_size,
-            file_size - start_range
+            mime_type,
+            file_size - start_range,
+            extra_headers
         );
+
+        if debug {
+            info!("DEBUG RESPONSE HEADERS:\n{}", header);
+        }
+
         let _ = stream.write_all(header.as_bytes());
         let mut file = file;
         let _ = file.seek(SeekFrom::Start(start_range));
@@ -256,6 +311,7 @@ fn handle_post_request(
     ip_address: String,
     directory: String,
     server_name: String,
+    debug: bool,
 ) {
     let response_body = if request.contains("#GetSortCapabilities") {
         GET_SORT_CAPABILITIES_RESPONSE_XML.to_string()
@@ -311,13 +367,16 @@ fn handle_post_request(
         }
     };
 
-    let full_response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\nEXT:\r\nServer: {}/1.3.0\r\n\r\n{}",
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\nEXT:\r\nServer: {}/1.3.0\r\n\r\n",
         response_body.len(),
-        server_name,
-        response_body
+        server_name
     );
-    let _ = stream.write_all(full_response.as_bytes());
+    if debug {
+        info!("DEBUG RESPONSE HEADERS:\n{}", header);
+    }
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(response_body.as_bytes());
 }
 
 fn format_duration(seconds: u64) -> String {
@@ -356,7 +415,6 @@ fn generate_browse_response(
             if name.starts_with('.') {
                 continue;
             }
-
             let entry_path = entry.path();
             let is_dir = entry_path.is_dir();
             let ext = entry_path
@@ -365,12 +423,14 @@ fn generate_browse_response(
                 .unwrap_or("")
                 .to_lowercase();
 
+            // Only list directories or supported video files
             if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
                 entries.push((name, is_dir, entry_path));
             }
         }
     }
 
+    // Ensure consistent pagination
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let total_matches = entries.len();
 
@@ -397,9 +457,10 @@ fn generate_browse_response(
         let mut display_desc = String::new();
         let mut duration_str = String::new();
         let mut subtitle_xml = String::new();
+        let mut video_res_attr = String::new();
 
         if !*is_dir {
-            // Metadata Extraction
+            // Metadata extraction
             if let Ok(tag) = Tag::read_from_path(entry_path) {
                 if let Some(t) = tag.title() {
                     display_title = encode_title_name(t);
@@ -415,7 +476,7 @@ fn generate_browse_response(
                 duration_str = format!(" duration=\"{}\"", format_duration(d.as_secs()));
             }
 
-            // Subtitle Detection
+            // Advanced Subtitle Detection and Linking
             let srt_path = entry_path.with_extension("srt");
             let vtt_path = entry_path.with_extension("vtt");
 
@@ -436,7 +497,13 @@ fn generate_browse_response(
                 };
                 let sub_url = format!("http://{}:8200/{}", ip_address, encode(&sub_child_id));
 
-                // Add secondary resource and LG-specific caption tag
+                // 1. Attribute for the VIDEO res tag (PacketVideo standard)
+                video_res_attr = format!(
+                    " pv:subtitleFileUri=\"{}\" xmlns:pv=\"http://www.pv.com/pvns/\"",
+                    sub_url
+                );
+
+                // 2. Secondary resource tag for standard DLNA
                 subtitle_xml = format!(
                     "<res protocolInfo=\"http-get:*:{} :*\">{}</res>\
                      <sec:CaptionInfoEx xmlns:sec=\"http://www.sec.co.kr/\">{}</sec:CaptionInfoEx>",
@@ -454,11 +521,12 @@ fn generate_browse_response(
                 encoded_id, path, display_title
             );
         } else {
+            // Note: video_res_attr is inserted INTO the video <res> tag
             didl_raw += &format!(
                 "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
                  <dc:title>{}</dc:title>{}{}\
                  <upnp:class>object.item.videoItem</upnp:class>\
-                 <res protocolInfo=\"http-get:*:video/mp4:{}\"{}>http://{}:8200/{}</res>\
+                 <res protocolInfo=\"http-get:*:video/mp4:{}\"{}{}>http://{}:8200/{}</res>\
                  {}\
                  </item>",
                 encoded_id,
@@ -468,6 +536,7 @@ fn generate_browse_response(
                 display_desc,
                 DLNA_FEATURES,
                 duration_str,
+                video_res_attr,
                 ip_address,
                 encoded_id,
                 subtitle_xml
@@ -519,11 +588,9 @@ fn generate_meta_response(path: &str, ip_address: String, _server_name: String) 
 fn decode(s: &str) -> String {
     s.replace("%20", " ").replace("&amp;", "&")
 }
-
 fn encode(s: &str) -> String {
     s.replace(" ", "%20").replace("&", "&amp;")
 }
-
 fn encode_title_name(s: &str) -> String {
     s.replace("&", "&amp;")
         .replace("<", "&lt;")
