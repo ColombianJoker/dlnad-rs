@@ -241,7 +241,6 @@ fn handle_get_request(
             file_size - start_range
         );
         let _ = stream.write_all(header.as_bytes());
-        // Simple file streaming...
         let mut file = file;
         let _ = file.seek(SeekFrom::Start(start_range));
         let mut buffer = [0; 8192];
@@ -264,7 +263,6 @@ fn handle_post_request(
     let response_body = if request.contains("#GetSortCapabilities") {
         GET_SORT_CAPABILITIES_RESPONSE_XML.to_string()
     } else {
-        // Extract ObjectID from the SOAP body
         let object_id = request
             .find("<ObjectID>")
             .map(|s| {
@@ -274,26 +272,50 @@ fn handle_post_request(
             })
             .unwrap_or("0");
 
+        let start_index = request
+            .find("<StartingIndex>")
+            .map(|s| {
+                let start = s + 15;
+                let end = request[start..].find("</StartingIndex>").unwrap_or(0);
+                request[start..start + end].parse::<usize>().unwrap_or(0)
+            })
+            .unwrap_or(0);
+
+        let requested_count = request
+            .find("<RequestedCount>")
+            .map(|s| {
+                let start = s + 16;
+                let end = request[start..].find("</RequestedCount>").unwrap_or(0);
+                request[start..start + end].parse::<usize>().unwrap_or(0)
+            })
+            .unwrap_or(100);
+
+        // Include pagination in cache key to prevent serving wrong slice
+        let cache_key = format!("{}:{}:{}", object_id, start_index, requested_count);
+
         let mut cache_lock = cache.lock().unwrap();
-        if let Some(cached) = cache_lock.get(object_id) {
+        if let Some(cached) = cache_lock.get(&cache_key) {
             String::from_utf8_lossy(cached).to_string()
         } else {
-            // Map "0" to the base directory
-            let path_to_browse = if object_id == "0" { "" } else { object_id };
-
             let resp = if object_id == "0"
-                || Path::new(&format!("{}/{}", directory, decode(path_to_browse))).is_dir()
+                || Path::new(&format!("{}/{}", directory, decode(object_id))).is_dir()
             {
-                generate_browse_response(object_id, ip_address, directory, server_name.clone())
+                generate_browse_response(
+                    object_id,
+                    start_index,
+                    requested_count,
+                    ip_address,
+                    directory,
+                    server_name.clone(),
+                )
             } else {
                 generate_meta_response(object_id, ip_address, server_name.clone())
             };
-            cache_lock.insert(object_id.to_string(), resp.as_bytes().to_vec());
+            cache_lock.insert(cache_key, resp.as_bytes().to_vec());
             resp
         }
     };
 
-    // LG TVs require exact Content-Length and the EXT: header
     let full_response = format!(
         "HTTP/1.1 200 OK\r\n\
         Content-Type: text/xml; charset=\"utf-8\"\r\n\
@@ -318,18 +340,19 @@ fn generate_meta_response(path: &str, ip_address: String, _server_name: String) 
         &format!("http-get:*:video/mp4:{}", DLNA_FEATURES),
     );
     format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches></u:BrowseResponse></s:Body></s:Envelope>",
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
         result_xml
     )
 }
 
 fn generate_browse_response(
     path: &str,
+    start_index: usize,
+    requested_count: usize,
     ip_address: String,
     directory: String,
     _server_name: String,
 ) -> String {
-    // 1. Build the raw DIDL string first (use standard tags)
     let mut didl_raw = String::from(
         "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
         xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" \
@@ -343,59 +366,77 @@ fn generate_browse_response(
     };
     let full_path = Path::new(&directory).join(&relative_dir);
 
-    let mut entries = 0;
+    let mut entries = Vec::new();
+
     if let Ok(dir) = fs::read_dir(full_path) {
         for entry in dir.filter_map(Result::ok) {
-            let entry_path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-
-            // Skip hidden files
             if name.starts_with('.') {
                 continue;
             }
 
-            let child_id = if relative_dir.is_empty() {
-                name.clone()
-            } else {
-                format!("{}/{}", relative_dir, name)
-            };
+            let entry_path = entry.path();
+            let is_dir = entry_path.is_dir();
+            let ext = entry_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
 
-            let encoded_id = encode(&child_id);
-            let safe_title = encode_title_name(&name);
-
-            if entry_path.is_dir() {
-                didl_raw += &format!(
-                    "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\">\
-                    <dc:title>{}</dc:title>\
-                    <upnp:class>object.container.storageFolder</upnp:class>\
-                    </container>",
-                    encoded_id, path, safe_title
-                );
-            } else {
-                let ext = entry_path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                // LG TVs specifically look for these extensions in the video browser
-                if ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
-                    didl_raw += &format!(
-                        "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
-                        <dc:title>{}</dc:title>\
-                        <upnp:class>object.item.videoItem</upnp:class>\
-                        <res protocolInfo=\"http-get:*:video/mp4:{}\">http://{}:8200/{}</res>\
-                        </item>",
-                        encoded_id, path, safe_title, DLNA_FEATURES, ip_address, encoded_id
-                    );
-                }
+            if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
+                entries.push((name, is_dir));
             }
-            entries += 1;
         }
+    }
+
+    // Sort entries to ensure pagination is consistent across multiple requests
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let total_matches = entries.len();
+
+    // Slice based on TV's request
+    let slice = entries
+        .iter()
+        .skip(start_index)
+        .take(if requested_count == 0 {
+            total_matches
+        } else {
+            requested_count
+        });
+
+    let mut returned_count = 0;
+    for (name, is_dir) in slice {
+        let child_id = if relative_dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", relative_dir, name)
+        };
+
+        let encoded_id = encode(&child_id);
+        let safe_title = encode_title_name(name);
+
+        if *is_dir {
+            didl_raw += &format!(
+                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\">\
+                <dc:title>{}</dc:title>\
+                <upnp:class>object.container.storageFolder</upnp:class>\
+                </container>",
+                encoded_id, path, safe_title
+            );
+        } else {
+            didl_raw += &format!(
+                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
+                <dc:title>{}</dc:title>\
+                <upnp:class>object.item.videoItem</upnp:class>\
+                <res protocolInfo=\"http-get:*:video/mp4:{}\">http://{}:8200/{}</res>\
+                </item>",
+                encoded_id, path, safe_title, DLNA_FEATURES, ip_address, encoded_id
+            );
+        }
+        returned_count += 1;
     }
     didl_raw += "</DIDL-Lite>";
 
-    // 2. CRITICAL: Escape the DIDL-Lite for the SOAP Result container
-    // We must replace & first, then others to avoid double-escaping the & in &lt;
     let escaped_didl = didl_raw
         .replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -403,7 +444,6 @@ fn generate_browse_response(
         .replace("\"", "&quot;")
         .replace("'", "&apos;");
 
-    // 3. Wrap in the SOAP Envelope with the LGE-friendly UpdateID
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
         <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
@@ -417,7 +457,7 @@ fn generate_browse_response(
         </u:BrowseResponse>\
         </s:Body>\
         </s:Envelope>",
-        escaped_didl, entries, entries
+        escaped_didl, returned_count, total_matches
     )
 }
 
@@ -426,12 +466,10 @@ fn decode(s: &str) -> String {
 }
 
 fn encode(s: &str) -> String {
-    // URLs need %20 for spaces
     s.replace(" ", "%20").replace("&", "&amp;")
 }
 
 fn encode_title_name(s: &str) -> String {
-    // Titles inside the XML need standard escaping
     s.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
