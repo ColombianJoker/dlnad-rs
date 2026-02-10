@@ -4,13 +4,13 @@ A lightweight DLNA media server written in Rust, specifically optimized for LG W
 
 ## Features
 
-* **Dynamic Versioning**: Baked-in build timestamps for easy version tracking.
-* **Metadata Extraction**: Reads embedded MP4 titles and durations using the `mp4ameta` crate.
-* **Advanced Subtitle Support**:
-* Automatically detects `.srt` and `.vtt` files with matching filenames.
-* Implements `CaptionInfo.sec` and `srh` protocol headers required for LG/Samsung TVs.
-* **Thumbnail Discovery**: Shows video previews by automatically linking `.jpg` or `.png` files.
-* **Debug Mode**: Includes a full header trace to troubleshoot TV-to-Server handshakes.
+  * **Dynamic Versioning**: Baked-in build timestamps for easy version tracking.
+  * **Metadata Extraction**: Reads embedded MP4 titles and durations using the `mp4ameta` crate.
+  * **Advanced Subtitle Support**:
+  * Automatically detects `.srt` and `.vtt` files with matching filenames.
+  * Implements `CaptionInfo.sec` and `srh` protocol headers required for LG/Samsung TVs.
+  * **Thumbnail Discovery**: Shows video previews by automatically linking `.jpg` or `.png` files.
+  * **Debug Mode**: Includes a full header trace to troubleshoot TV-to-Server handshakes.
 
 ## Usage
 
