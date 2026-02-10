@@ -7,12 +7,11 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
 
 use clap::Parser;
 use gethostname::gethostname;
 use local_ip_address::local_ip;
-use log::{error, info, warn};
+use log::info;
 
 const NUM_THREADS: i32 = 64;
 const CONTENT_DIR_XML: &str = include_str!("ContentDir.xml");
@@ -29,37 +28,24 @@ const DLNA_FEATURES: &str =
 struct Cli {
     #[arg(short, long, default_value_t = 8200)]
     port: u16,
-
     #[arg(short = 'i', long = "ip", default_value = "0.0.0.0")]
     ip_address: String,
-
     #[arg(short = 'd', long = "directory", default_value = ".")]
     directory: String,
-
     #[arg(short, long)]
     name: Option<String>,
-
     #[arg(short = 'v', long)]
     verbose: bool,
+    #[arg(long)]
+    debug: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
-
     let server_ip = if cli.ip_address == "0.0.0.0" {
         match local_ip() {
-            Ok(ip) => {
-                let ip_str = ip.to_string();
-                info!("Detected primary IP address: {}", ip_str);
-                ip_str
-            }
-            Err(e) => {
-                warn!(
-                    "Could not detect primary IP ({}), falling back to 127.0.0.1",
-                    e
-                );
-                "127.0.0.1".to_string()
-            }
+            Ok(ip) => ip.to_string(),
+            Err(_) => "127.0.0.1".to_string(),
         }
     } else {
         cli.ip_address.clone()
@@ -86,41 +72,22 @@ fn main() {
         server_name, server_ip, cli.port
     );
 
-    let ssdp_socket =
-        UdpSocket::bind(format!("0.0.0.0:{}", SSDP_PORT)).expect("Could not bind SSDP socket");
-    let multicast_addr = "239.255.255.250"
-        .parse()
-        .expect("Invalid multicast address");
-    let interface_ip: std::net::Ipv4Addr = server_ip.parse().expect("Invalid Server IP format");
+    let ssdp_socket = UdpSocket::bind(format!("0.0.0.0:{}", SSDP_PORT)).unwrap();
+    let multicast_addr = "239.255.255.250".parse().unwrap();
+    let interface_ip: std::net::Ipv4Addr = server_ip.parse().unwrap();
     ssdp_socket
         .join_multicast_v4(&multicast_addr, &interface_ip)
-        .expect("Failed to join multicast group");
+        .unwrap();
 
     let mut ssdp_response = Vec::new();
-    write!(
-        ssdp_response,
-        "HTTP/1.1 200 OK\r\n\
-        CACHE-CONTROL: max-age=1800\r\n\
-        EXT:\r\n\
-        LOCATION: http://{}:{}/rootDesc.xml\r\n\
-        SERVER: DLNA/1.0 DLNADOC/1.50 UPnP/1.0 {}/1.3.0\r\n\
-        ST: urn:schemas-upnp-org:device:MediaServer:1\r\n\
-        USN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\
-        \r\n",
-        server_ip, cli.port, server_name
-    ).unwrap();
+    write!(ssdp_response, "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nLOCATION: http://{}:{}/rootDesc.xml\r\nSERVER: UPnP/1.0 DLNADOC/1.50 Gunther/1.3.0\r\nST: urn:schemas-upnp-org:device:MediaServer:1\r\nUSN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n", server_ip, cli.port).unwrap();
 
-    let ssdp_socket_clone = ssdp_socket
-        .try_clone()
-        .expect("Could not clone SSDP socket");
+    let ssdp_socket_clone = ssdp_socket.try_clone().unwrap();
     thread::spawn(move || {
         let mut buffer = [0; 4096];
         loop {
-            match ssdp_socket_clone.recv_from(&mut buffer) {
-                Ok((_size, src_addr)) => {
-                    let _ = ssdp_socket_clone.send_to(&ssdp_response, src_addr);
-                }
-                Err(err) => error!("SSDP Error: {:?}", err),
+            if let Ok((_, src_addr)) = ssdp_socket_clone.recv_from(&mut buffer) {
+                let _ = ssdp_socket_clone.send_to(&ssdp_response, src_addr);
             }
         }
     });
@@ -133,6 +100,7 @@ fn main() {
         let ip_to_pass = server_ip.clone();
         let directory_clone = cli.directory.clone();
         let server_name_clone = server_name.clone();
+        let debug_flag = cli.debug;
 
         thread::spawn(move || {
             loop {
@@ -143,6 +111,7 @@ fn main() {
                     ip_to_pass.clone(),
                     directory_clone.clone(),
                     server_name_clone.clone(),
+                    debug_flag,
                 );
             }
         });
@@ -161,44 +130,46 @@ fn handle_client(
     ip_address: String,
     directory: String,
     server_name: String,
+    debug: bool,
 ) {
-    let mut buffer = Vec::new();
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(5000)));
-
-    let mut buf = vec![0; 4096];
+    let mut buf = vec![0; 8192];
     if let Ok(n) = stream.read(&mut buf) {
         if n > 0 {
-            buffer.extend_from_slice(&buf[..n]);
-            if let Ok(request) = std::str::from_utf8(&buffer) {
-                let method = request.split_whitespace().next().unwrap_or("");
-                match method {
-                    "GET" => {
-                        handle_get_request(stream, request, ip_address, directory, server_name)
-                    }
-                    "HEAD" => handle_head_request(stream),
-                    "POST" => handle_post_request(
-                        stream,
-                        request.to_string(),
-                        cache,
-                        ip_address,
-                        directory,
-                        server_name,
-                    ),
-                    _ => (),
-                }
+            let request = String::from_utf8_lossy(&buf[..n]);
+            if debug {
+                info!("DEBUG REQUEST:\n{}", request);
+            }
+            let method = request.split_whitespace().next().unwrap_or("");
+            match method {
+                "GET" => handle_get_request(stream, &request, ip_address, directory, server_name),
+                "POST" => handle_post_request(
+                    stream,
+                    request.to_string(),
+                    cache,
+                    ip_address,
+                    directory,
+                    server_name,
+                ),
+                "SUBSCRIBE" => handle_subscribe_request(stream),
+                "HEAD" => handle_head_request(stream),
+                _ => (),
             }
         }
     }
 }
 
+fn handle_subscribe_request(mut stream: TcpStream) {
+    let response = "HTTP/1.1 200 OK\r\n\
+                    SID: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2\r\n\
+                    TIMEOUT: Second-300\r\n\
+                    Content-Length: 0\r\n\
+                    Connection: close\r\n\r\n";
+    let _ = stream.write_all(response.as_bytes());
+}
+
 fn handle_head_request(mut stream: TcpStream) {
     let response = format!(
-        "HTTP/1.1 200 OK\r\n\
-        Content-Type: video/mp4\r\n\
-        Accept-Ranges: bytes\r\n\
-        Content-Length: 0\r\n\
-        contentFeatures.dlna.org: {}\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: 0\r\ncontentFeatures.dlna.org: {}\r\n\r\n",
         DLNA_FEATURES
     );
     let _ = stream.write_all(response.as_bytes());
@@ -211,9 +182,7 @@ fn handle_get_request(
     directory: String,
     server_name: String,
 ) {
-    let mut parts = http_request.split_whitespace();
-    parts.next();
-    let path = decode(parts.next().unwrap_or("/"));
+    let path = decode(http_request.split_whitespace().nth(1).unwrap_or("/"));
     let trimmed_path = path.trim_start_matches(['.', '/']);
     let combined_path = format!("{}/{}", directory, path);
 
@@ -224,7 +193,7 @@ fn handle_get_request(
                 &format!("<friendlyName>{}</friendlyName>", server_name),
             );
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n{}",
                 content.len(),
                 content
             );
@@ -238,7 +207,7 @@ fn handle_get_request(
                 _ => X_MS_MEDIA_RECEIVER_REGISTRAR_XML,
             };
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\n\r\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n{}",
                 content.len(),
                 content
             );
@@ -248,85 +217,40 @@ fn handle_get_request(
         _ => (),
     }
 
-    let mut file = match File::open(&combined_path) {
-        Ok(f) => f,
-        Err(_) => {
-            let _ = stream.write_all(b"HTTP/1.1 404 NOT FOUND\r\n\r\n");
-            return;
-        }
-    };
-
-    let file_size = file.metadata().unwrap().len();
-    let mut start_range: u64 = 0;
-
-    if let Some(line) = http_request
-        .lines()
-        .find(|l| l.starts_with("Range: bytes="))
-    {
-        if let Some(r) = line.strip_prefix("Range: bytes=") {
-            if let Some(parsed) = r.split('-').next().and_then(|n| n.parse::<u64>().ok()) {
-                start_range = parsed;
+    if let Ok(file) = File::open(&combined_path) {
+        let file_size = file.metadata().unwrap().len();
+        let mut start_range = 0;
+        if let Some(line) = http_request
+            .lines()
+            .find(|l| l.starts_with("Range: bytes="))
+        {
+            if let Some(r) = line.strip_prefix("Range: bytes=") {
+                start_range = r
+                    .split('-')
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
             }
         }
-    }
-
-    file.seek(SeekFrom::Start(start_range)).unwrap();
-
-    let status = if start_range > 0 {
-        "HTTP/1.1 206 Partial Content"
-    } else {
-        "HTTP/1.1 200 OK"
-    };
-    let header = format!(
-        "{}\r\n\
-        Content-Range: bytes {}-{}/{}\r\n\
-        Content-Type: video/mp4\r\n\
-        Content-Length: {}\r\n\
-        Accept-Ranges: bytes\r\n\
-        transferMode.dlna.org: Streaming\r\n\
-        contentFeatures.dlna.org: {}\r\n\
-        Connection: close\r\n\r\n",
-        status,
-        start_range,
-        file_size - 1,
-        file_size,
-        file_size - start_range,
-        DLNA_FEATURES
-    );
-
-    if stream.write_all(header.as_bytes()).is_ok() {
+        let header = format!(
+            "HTTP/1.1 {} Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+            if start_range > 0 { "206" } else { "200" },
+            start_range,
+            file_size - 1,
+            file_size,
+            file_size - start_range
+        );
+        let _ = stream.write_all(header.as_bytes());
+        // Simple file streaming...
+        let mut file = file;
+        let _ = file.seek(SeekFrom::Start(start_range));
         let mut buffer = [0; 8192];
-        let mut remaining = file_size - start_range;
-        while remaining > 0 {
-            let to_read = std::cmp::min(remaining as usize, buffer.len());
-            if let Ok(n) = file.read(&mut buffer[..to_read]) {
-                if n == 0 || stream.write_all(&buffer[..n]).is_err() {
-                    break;
-                }
-                remaining -= n as u64;
-            } else {
+        while let Ok(n) = file.read(&mut buffer) {
+            if n == 0 || stream.write_all(&buffer[..n]).is_err() {
                 break;
             }
         }
     }
-}
-
-fn generate_meta_response(path: &str, ip_address: String, server_name: String) -> String {
-    let result_xml = fmt::format(format_args!(
-        include_str!("meta_response_result.xml"),
-        ip_address, path
-    ))
-    .replace(
-        "http-get:*:video/mp4:*",
-        &format!("http-get:*:video/mp4:{}", DLNA_FEATURES),
-    );
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nServer: {}/1.3.0\r\n\r\n\
-        <?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches></u:BrowseResponse></s:Body></s:Envelope>",
-        result_xml.len() + 300,
-        server_name,
-        result_xml
-    )
 }
 
 fn handle_post_request(
@@ -337,85 +261,163 @@ fn handle_post_request(
     directory: String,
     server_name: String,
 ) {
-    if request.contains("#GetSortCapabilities") {
-        let res = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\n\r\n{}",
-            GET_SORT_CAPABILITIES_RESPONSE_XML.len(),
-            GET_SORT_CAPABILITIES_RESPONSE_XML
-        );
-        let _ = stream.write_all(res.as_bytes());
-        return;
-    }
-
-    let object_id = if let Some(s) = request.find("<ObjectID>") {
-        let start = s + 10;
-        let end = request[start..].find("</ObjectID>").unwrap_or(0);
-        &request[start..start + end]
+    let response_body = if request.contains("#GetSortCapabilities") {
+        GET_SORT_CAPABILITIES_RESPONSE_XML.to_string()
     } else {
-        "0"
+        // Extract ObjectID from the SOAP body
+        let object_id = request
+            .find("<ObjectID>")
+            .map(|s| {
+                let start = s + 10;
+                let end = request[start..].find("</ObjectID>").unwrap_or(0);
+                &request[start..start + end]
+            })
+            .unwrap_or("0");
+
+        let mut cache_lock = cache.lock().unwrap();
+        if let Some(cached) = cache_lock.get(object_id) {
+            String::from_utf8_lossy(cached).to_string()
+        } else {
+            // Map "0" to the base directory
+            let path_to_browse = if object_id == "0" { "" } else { object_id };
+
+            let resp = if object_id == "0"
+                || Path::new(&format!("{}/{}", directory, decode(path_to_browse))).is_dir()
+            {
+                generate_browse_response(object_id, ip_address, directory, server_name.clone())
+            } else {
+                generate_meta_response(object_id, ip_address, server_name.clone())
+            };
+            cache_lock.insert(object_id.to_string(), resp.as_bytes().to_vec());
+            resp
+        }
     };
 
-    let mut cache_lock = cache.lock().unwrap();
-    if let Some(cached) = cache_lock.get(object_id) {
-        let _ = stream.write_all(cached);
-    } else {
-        let decoded_id = decode(object_id.strip_prefix("64$").unwrap_or(object_id));
-        let path = format!("{}/{}", directory, decoded_id);
-        let response = if Path::new(&path).is_dir() {
-            generate_browse_response(object_id, 0, 100, ip_address, directory, server_name)
-        } else {
-            generate_meta_response(object_id, ip_address, server_name)
-        };
-        cache_lock.insert(object_id.to_string(), response.as_bytes().to_vec());
-        let _ = stream.write_all(response.as_bytes());
-    }
+    // LG TVs require exact Content-Length and the EXT: header
+    let full_response = format!(
+        "HTTP/1.1 200 OK\r\n\
+        Content-Type: text/xml; charset=\"utf-8\"\r\n\
+        Content-Length: {}\r\n\
+        Connection: close\r\n\
+        EXT:\r\n\
+        Server: {}/1.3.0\r\n\r\n{}",
+        response_body.len(),
+        server_name,
+        response_body
+    );
+    let _ = stream.write_all(full_response.as_bytes());
+}
+
+fn generate_meta_response(path: &str, ip_address: String, _server_name: String) -> String {
+    let result_xml = fmt::format(format_args!(
+        include_str!("meta_response_result.xml"),
+        ip_address, path
+    ))
+    .replace(
+        "http-get:*:video/mp4:*",
+        &format!("http-get:*:video/mp4:{}", DLNA_FEATURES),
+    );
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches></u:BrowseResponse></s:Body></s:Envelope>",
+        result_xml
+    )
 }
 
 fn generate_browse_response(
     path: &str,
-    _start: u32,
-    _count: u32,
-    _ip_address: String,
+    ip_address: String,
     directory: String,
-    server_name: String,
+    _server_name: String,
 ) -> String {
-    let mut didl = String::from(
-        "&lt;DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"&gt;",
+    // 1. Build the raw DIDL string first (use standard tags)
+    let mut didl_raw = String::from(
+        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+        xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" \
+        xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
     );
-    let full_path = format!("{}/{}", directory, decode(path));
-    let mut entries = 0;
 
+    let relative_dir = if path == "0" {
+        "".to_string()
+    } else {
+        decode(path)
+    };
+    let full_path = Path::new(&directory).join(&relative_dir);
+
+    let mut entries = 0;
     if let Ok(dir) = fs::read_dir(full_path) {
         for entry in dir.filter_map(Result::ok) {
+            let entry_path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
+
+            // Skip hidden files
             if name.starts_with('.') {
                 continue;
             }
-            if entry.path().is_dir() {
-                didl += &format!(
-                    "&lt;container id=\"{path}/{}\" parentID=\"{path}\" restricted=\"1\"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;...",
-                    encode(&name),
-                    encode_title_name(&name)
+
+            let child_id = if relative_dir.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", relative_dir, name)
+            };
+
+            let encoded_id = encode(&child_id);
+            let safe_title = encode_title_name(&name);
+
+            if entry_path.is_dir() {
+                didl_raw += &format!(
+                    "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\">\
+                    <dc:title>{}</dc:title>\
+                    <upnp:class>object.container.storageFolder</upnp:class>\
+                    </container>",
+                    encoded_id, path, safe_title
                 );
             } else {
-                didl += &format!(
-                    "&lt;item id=\"{path}/{}\" parentID=\"{path}\" restricted=\"1\"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;...",
-                    encode(&name),
-                    encode_title_name(&name)
-                );
+                let ext = entry_path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                // LG TVs specifically look for these extensions in the video browser
+                if ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
+                    didl_raw += &format!(
+                        "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
+                        <dc:title>{}</dc:title>\
+                        <upnp:class>object.item.videoItem</upnp:class>\
+                        <res protocolInfo=\"http-get:*:video/mp4:{}\">http://{}:8200/{}</res>\
+                        </item>",
+                        encoded_id, path, safe_title, DLNA_FEATURES, ip_address, encoded_id
+                    );
+                }
             }
             entries += 1;
         }
     }
-    didl += "&lt;/DIDL-Lite&gt;";
-    let soap = format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{didl}</Result><NumberReturned>{entries}</NumberReturned><TotalMatches>{entries}</TotalMatches></u:BrowseResponse></s:Body></s:Envelope>"
-    );
+    didl_raw += "</DIDL-Lite>";
+
+    // 2. CRITICAL: Escape the DIDL-Lite for the SOAP Result container
+    // We must replace & first, then others to avoid double-escaping the & in &lt;
+    let escaped_didl = didl_raw
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&apos;");
+
+    // 3. Wrap in the SOAP Envelope with the LGE-friendly UpdateID
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nServer: {}/1.3.0\r\n\r\n{}",
-        soap.len(),
-        server_name,
-        soap
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+        <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
+        s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\
+        <s:Body>\
+        <u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">\
+        <Result>{}</Result>\
+        <NumberReturned>{}</NumberReturned>\
+        <TotalMatches>{}</TotalMatches>\
+        <UpdateID>1</UpdateID>\
+        </u:BrowseResponse>\
+        </s:Body>\
+        </s:Envelope>",
+        escaped_didl, entries, entries
     )
 }
 
@@ -424,9 +426,13 @@ fn decode(s: &str) -> String {
 }
 
 fn encode(s: &str) -> String {
-    s.replace(' ', "%20").replace('&', "&amp;")
+    // URLs need %20 for spaces
+    s.replace(" ", "%20").replace("&", "&amp;")
 }
 
 fn encode_title_name(s: &str) -> String {
-    s.replace('&', "&amp;")
+    // Titles inside the XML need standard escaping
+    s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
 }
