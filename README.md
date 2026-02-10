@@ -38,9 +38,9 @@ To ensure subtitles and thumbnails appear correctly on LG TVs:
 
 1. **Format**: External subtitles are most stable in `.srt` format (UTF-8 encoding without BOM).
 2. **Naming**: Place your subtitle and image files in the same directory as the video with the exact same base name:
-* `Course_01.mp4`
-* `Course_01.srt`
-* `Course_01.jpg` (Thumbnail)
+  * `Course_01.mp4`
+  * `Course_01.srt`
+  * `Course_01.jpg` (Thumbnail)
 
 
 3. **Internal Logic**: This server uses the `pv:subtitleFileUri` attribute and `DLNA.ORG_PN=SUBTITLE` features to trigger the TV's native subtitle engine.
