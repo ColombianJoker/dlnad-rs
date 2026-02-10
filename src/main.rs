@@ -12,6 +12,7 @@ use clap::Parser;
 use gethostname::gethostname;
 use local_ip_address::local_ip;
 use log::info;
+use mp4ameta::Tag;
 
 const NUM_THREADS: i32 = 64;
 const CONTENT_DIR_XML: &str = include_str!("ContentDir.xml");
@@ -36,7 +37,7 @@ struct Cli {
     name: Option<String>,
     #[arg(short = 'v', long)]
     verbose: bool,
-    #[arg(long)]
+    #[arg(long, hide = true)]
     debug: bool,
 }
 
@@ -159,11 +160,7 @@ fn handle_client(
 }
 
 fn handle_subscribe_request(mut stream: TcpStream) {
-    let response = "HTTP/1.1 200 OK\r\n\
-                    SID: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2\r\n\
-                    TIMEOUT: Second-300\r\n\
-                    Content-Length: 0\r\n\
-                    Connection: close\r\n\r\n";
+    let response = "HTTP/1.1 200 OK\r\nSID: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2\r\nTIMEOUT: Second-300\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     let _ = stream.write_all(response.as_bytes());
 }
 
@@ -290,9 +287,7 @@ fn handle_post_request(
             })
             .unwrap_or(100);
 
-        // Include pagination in cache key to prevent serving wrong slice
         let cache_key = format!("{}:{}:{}", object_id, start_index, requested_count);
-
         let mut cache_lock = cache.lock().unwrap();
         if let Some(cached) = cache_lock.get(&cache_key) {
             String::from_utf8_lossy(cached).to_string()
@@ -317,17 +312,135 @@ fn handle_post_request(
     };
 
     let full_response = format!(
-        "HTTP/1.1 200 OK\r\n\
-        Content-Type: text/xml; charset=\"utf-8\"\r\n\
-        Content-Length: {}\r\n\
-        Connection: close\r\n\
-        EXT:\r\n\
-        Server: {}/1.3.0\r\n\r\n{}",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=\"utf-8\"\r\nContent-Length: {}\r\nConnection: close\r\nEXT:\r\nServer: {}/1.3.0\r\n\r\n{}",
         response_body.len(),
         server_name,
         response_body
     );
     let _ = stream.write_all(full_response.as_bytes());
+}
+
+fn format_duration(seconds: u64) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    format!("{:01}:{:02}:{:02}", h, m, s)
+}
+
+fn generate_browse_response(
+    path: &str,
+    start_index: usize,
+    requested_count: usize,
+    ip_address: String,
+    directory: String,
+    _server_name: String,
+) -> String {
+    let mut didl_raw = String::from(
+        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
+    );
+    let relative_dir = if path == "0" {
+        "".to_string()
+    } else {
+        decode(path)
+    };
+    let full_path = Path::new(&directory).join(&relative_dir);
+    let mut entries = Vec::new();
+
+    if let Ok(dir) = fs::read_dir(full_path) {
+        for entry in dir.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let entry_path = entry.path();
+            let is_dir = entry_path.is_dir();
+            let ext = entry_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
+                entries.push((name, is_dir, entry_path));
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let total_matches = entries.len();
+    let slice = entries
+        .iter()
+        .skip(start_index)
+        .take(if requested_count == 0 {
+            total_matches
+        } else {
+            requested_count
+        });
+
+    let mut returned_count = 0;
+    for (name, is_dir, entry_path) in slice {
+        let child_id = if relative_dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", relative_dir, name)
+        };
+        let encoded_id = encode(&child_id);
+
+        let mut display_title = encode_title_name(name);
+        let mut display_artist = String::new();
+        let mut display_desc = String::new();
+        let mut duration_str = String::new();
+
+        if !*is_dir {
+            if let Ok(tag) = Tag::read_from_path(entry_path) {
+                if let Some(t) = tag.title() {
+                    display_title = encode_title_name(t);
+                }
+                if let Some(a) = tag.artist() {
+                    display_artist = format!("<upnp:artist>{}</upnp:artist>", encode_title_name(a));
+                }
+                display_desc = format!(
+                    "<dc:description>{}</dc:description>",
+                    encode_title_name(name)
+                );
+                // Tag::duration() returns a Duration structure, not an Option
+                let d = tag.duration();
+                duration_str = format!(" duration=\"{}\"", format_duration(d.as_secs()));
+            }
+        }
+
+        if *is_dir {
+            didl_raw += &format!(
+                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>",
+                encoded_id, path, display_title
+            );
+        } else {
+            didl_raw += &format!(
+                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\"><dc:title>{}</dc:title>{}{}<upnp:class>object.item.videoItem</upnp:class><res protocolInfo=\"http-get:*:video/mp4:{}\"{} >http://{}:8200/{}</res></item>",
+                encoded_id,
+                path,
+                display_title,
+                display_artist,
+                display_desc,
+                DLNA_FEATURES,
+                duration_str,
+                ip_address,
+                encoded_id
+            );
+        }
+        returned_count += 1;
+    }
+    didl_raw += "</DIDL-Lite>";
+    let escaped_didl = didl_raw
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&apos;");
+
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
+        escaped_didl, returned_count, total_matches
+    )
 }
 
 fn generate_meta_response(path: &str, ip_address: String, _server_name: String) -> String {
@@ -342,122 +455,6 @@ fn generate_meta_response(path: &str, ip_address: String, _server_name: String) 
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>1</NumberReturned><TotalMatches>1</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
         result_xml
-    )
-}
-
-fn generate_browse_response(
-    path: &str,
-    start_index: usize,
-    requested_count: usize,
-    ip_address: String,
-    directory: String,
-    _server_name: String,
-) -> String {
-    let mut didl_raw = String::from(
-        "<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
-        xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" \
-        xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">",
-    );
-
-    let relative_dir = if path == "0" {
-        "".to_string()
-    } else {
-        decode(path)
-    };
-    let full_path = Path::new(&directory).join(&relative_dir);
-
-    let mut entries = Vec::new();
-
-    if let Ok(dir) = fs::read_dir(full_path) {
-        for entry in dir.filter_map(Result::ok) {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-
-            let entry_path = entry.path();
-            let is_dir = entry_path.is_dir();
-            let ext = entry_path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-
-            if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
-                entries.push((name, is_dir));
-            }
-        }
-    }
-
-    // Sort entries to ensure pagination is consistent across multiple requests
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let total_matches = entries.len();
-
-    // Slice based on TV's request
-    let slice = entries
-        .iter()
-        .skip(start_index)
-        .take(if requested_count == 0 {
-            total_matches
-        } else {
-            requested_count
-        });
-
-    let mut returned_count = 0;
-    for (name, is_dir) in slice {
-        let child_id = if relative_dir.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", relative_dir, name)
-        };
-
-        let encoded_id = encode(&child_id);
-        let safe_title = encode_title_name(name);
-
-        if *is_dir {
-            didl_raw += &format!(
-                "<container id=\"{}\" parentID=\"{}\" restricted=\"1\" searchable=\"1\">\
-                <dc:title>{}</dc:title>\
-                <upnp:class>object.container.storageFolder</upnp:class>\
-                </container>",
-                encoded_id, path, safe_title
-            );
-        } else {
-            didl_raw += &format!(
-                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\">\
-                <dc:title>{}</dc:title>\
-                <upnp:class>object.item.videoItem</upnp:class>\
-                <res protocolInfo=\"http-get:*:video/mp4:{}\">http://{}:8200/{}</res>\
-                </item>",
-                encoded_id, path, safe_title, DLNA_FEATURES, ip_address, encoded_id
-            );
-        }
-        returned_count += 1;
-    }
-    didl_raw += "</DIDL-Lite>";
-
-    let escaped_didl = didl_raw
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\"", "&quot;")
-        .replace("'", "&apos;");
-
-    format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
-        <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
-        s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\
-        <s:Body>\
-        <u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">\
-        <Result>{}</Result>\
-        <NumberReturned>{}</NumberReturned>\
-        <TotalMatches>{}</TotalMatches>\
-        <UpdateID>1</UpdateID>\
-        </u:BrowseResponse>\
-        </s:Body>\
-        </s:Envelope>",
-        escaped_didl, returned_count, total_matches
     )
 }
 
