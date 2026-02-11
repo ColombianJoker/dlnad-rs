@@ -31,20 +31,28 @@ const DLNA_FEATURES: &str =
         version = env!("BUILD_VERSION"),
         about = "Gunther: A simple DLNA server for LG WebOS",
         long_about = None,
-        // This template ensures the version is printed in the help output
         help_template = "{bin} {version}\n{author-with-newline}{about-section}\n{usage-heading} {usage}\n\n{all-args}\n{after-help}"
     )]
 struct Cli {
     #[arg(short, long, default_value_t = 8200)]
     port: u16,
+
     #[arg(short = 'i', long = "ip", default_value = "0.0.0.0")]
     ip_address: String,
+
     #[arg(short = 'd', long = "directory", default_value = ".")]
     directory: String,
+
+    // Fixed 'shot' typo and corrected boolean flag syntax
+    #[arg(short = 'c', long = "cache")]
+    cache: bool,
+
     #[arg(short, long)]
     name: Option<String>,
+
     #[arg(short = 'v', long)]
     verbose: bool,
+
     #[arg(long, hide = true)]
     debug: bool,
 }
@@ -82,6 +90,12 @@ fn main() {
         cli.port
     );
 
+    if cli.cache {
+        info!("Response caching is ENABLED.");
+    } else {
+        info!("Response caching is DISABLED (Dynamic directory mode).");
+    }
+
     let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     // Initialize the thread-safe HashSet for tracking clients
     let connected_clients: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -118,6 +132,7 @@ fn main() {
         let directory_clone = cli.directory.clone();
         let server_name_clone = server_name.clone();
         let debug_flag = cli.debug;
+        let cache_flag = cli.cache;
 
         thread::spawn(move || {
             loop {
@@ -130,6 +145,7 @@ fn main() {
                     directory_clone.clone(),
                     server_name_clone.clone(),
                     debug_flag,
+                    cache_flag,
                 );
             }
         });
@@ -150,6 +166,7 @@ fn handle_client(
     directory: String,
     server_name: String,
     debug: bool,
+    cache_enabled: bool,
 ) {
     // Report new client connection with Reverse DNS resolution
     if let Ok(addr) = stream.peer_addr() {
@@ -195,6 +212,7 @@ fn handle_client(
                     directory,
                     server_name,
                     debug,
+                    cache_enabled,
                 ),
                 "SUBSCRIBE" => handle_subscribe_request(stream, debug),
                 "HEAD" => handle_head_request(stream, debug),
@@ -344,6 +362,7 @@ fn handle_post_request(
     directory: String,
     server_name: String,
     debug: bool,
+    cache_enabled: bool, // New parameter to toggle behavior
 ) {
     let response_body = if request.contains("#GetSortCapabilities") {
         GET_SORT_CAPABILITIES_RESPONSE_XML.to_string()
@@ -375,12 +394,34 @@ fn handle_post_request(
             })
             .unwrap_or(100);
 
-        let cache_key = format!("{}:{}:{}", object_id, start_index, requested_count);
-        let mut cache_lock = cache.lock().unwrap();
-        if let Some(cached) = cache_lock.get(&cache_key) {
-            String::from_utf8_lossy(cached).to_string()
+        // Conditional Caching Logic
+        if cache_enabled {
+            let cache_key = format!("{}:{}:{}", object_id, start_index, requested_count);
+            let mut cache_lock = cache.lock().unwrap();
+
+            if let Some(cached) = cache_lock.get(&cache_key) {
+                String::from_utf8_lossy(cached).to_string()
+            } else {
+                let resp = if object_id == "0"
+                    || Path::new(&format!("{}/{}", directory, decode(object_id))).is_dir()
+                {
+                    generate_browse_response(
+                        object_id,
+                        start_index,
+                        requested_count,
+                        ip_address.clone(),
+                        directory.clone(),
+                        server_name.clone(),
+                    )
+                } else {
+                    generate_meta_response(object_id, ip_address.clone(), server_name.clone())
+                };
+                cache_lock.insert(cache_key, resp.as_bytes().to_vec());
+                resp
+            }
         } else {
-            let resp = if object_id == "0"
+            // Bypass cache: Generate fresh response directly
+            if object_id == "0"
                 || Path::new(&format!("{}/{}", directory, decode(object_id))).is_dir()
             {
                 generate_browse_response(
@@ -393,9 +434,7 @@ fn handle_post_request(
                 )
             } else {
                 generate_meta_response(object_id, ip_address, server_name.clone())
-            };
-            cache_lock.insert(cache_key, resp.as_bytes().to_vec());
-            resp
+            }
         }
     };
 
@@ -405,9 +444,11 @@ fn handle_post_request(
         server_name,
         env!("BUILD_VERSION")
     );
+
     if debug {
         info!("DEBUG RESPONSE HEADERS:\n{}", header);
     }
+
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(response_body.as_bytes());
 }
