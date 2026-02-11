@@ -4,13 +4,15 @@ A lightweight DLNA media server written in Rust, specifically optimized for LG W
 
 ## Features
 
-  * **Dynamic Versioning**: Baked-in build timestamps for easy version tracking.
-  * **Metadata Extraction**: Reads embedded MP4 titles and durations using the `mp4ameta` crate.
-  * **Advanced Subtitle Support**:
+* **Dynamic Versioning**: Baked-in build timestamps for easy version tracking.
+* **Dynamic Directory Browsing**: Scans the filesystem in real-time, allowing you to add videos or thumbnails without restarting the server.
+* **Client Identification**: Logs the IP and resolved hostname (via Reverse DNS) of every new device that connects.
+* **Metadata Extraction**: Reads embedded MP4 titles and durations using the `mp4ameta` crate.
+* **Advanced Subtitle Support**:
   * Automatically detects `.srt` and `.vtt` files with matching filenames.
   * Implements `CaptionInfo.sec` and `srh` protocol headers required for LG/Samsung TVs.
-  * **Thumbnail Discovery**: Shows video previews by automatically linking `.jpg` or `.png` files.
-  * **Debug Mode**: Includes a full header trace to troubleshoot TV-to-Server handshakes.
+* **Thumbnail Discovery**: Shows video previews by automatically linking `.jpg` or `.png` files.
+* **Toggleable Caching**: Optional `--cache` flag to freeze directory listings in memory for faster performance.
 
 ## Usage
 
@@ -24,6 +26,7 @@ Options:
   -p, --port <PORT>            [default: 8200]
   -i, --ip <IP_ADDRESS>        [default: 0.0.0.0]
   -d, --directory <DIRECTORY>  [default: .]
+  -c, --cache                  Enable response caching (static mode)
   -n, --name <NAME>            Friendly name for the DLNA server
   -v, --verbose                Enable info logging
   --debug                      Print full HTTP request/response headers
