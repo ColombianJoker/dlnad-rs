@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::fs::File;
@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use clap::Parser;
+use dns_lookup::lookup_addr;
 use gethostname::gethostname;
 use local_ip_address::local_ip;
 use log::info;
@@ -82,6 +83,8 @@ fn main() {
     );
 
     let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Initialize the thread-safe HashSet for tracking clients
+    let connected_clients: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port)).unwrap();
 
     let ssdp_socket = UdpSocket::bind(format!("0.0.0.0:{}", SSDP_PORT)).unwrap();
@@ -106,9 +109,11 @@ fn main() {
 
     let (tx, rx) = mpsc::channel();
     let rx = Arc::new(Mutex::new(rx));
+
     for _ in 0..NUM_THREADS {
         let rx = Arc::clone(&rx);
         let cache = Arc::clone(&cache);
+        let clients_clone = Arc::clone(&connected_clients); // Ownership moved into the thread
         let ip_to_pass = server_ip.clone();
         let directory_clone = cli.directory.clone();
         let server_name_clone = server_name.clone();
@@ -120,6 +125,7 @@ fn main() {
                 handle_client(
                     stream,
                     cache.clone(),
+                    Arc::clone(&clients_clone), // Use Arc::clone explicitly here
                     ip_to_pass.clone(),
                     directory_clone.clone(),
                     server_name_clone.clone(),
@@ -139,18 +145,43 @@ fn main() {
 fn handle_client(
     mut stream: TcpStream,
     cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    connected_clients: Arc<Mutex<HashSet<String>>>,
     ip_address: String,
     directory: String,
     server_name: String,
     debug: bool,
 ) {
+    // Report new client connection with Reverse DNS resolution
+    if let Ok(addr) = stream.peer_addr() {
+        let client_ip = addr.ip();
+        let client_ip_str = client_ip.to_string();
+
+        let mut clients = connected_clients.lock().unwrap();
+        // Only log if this is the first time the IP is seen in this session
+        if clients.insert(client_ip_str.clone()) {
+            // Attempt to resolve hostname; fall back to IP if resolution fails
+            let hostname = lookup_addr(&client_ip).unwrap_or_else(|_| client_ip_str.clone());
+
+            if hostname != client_ip_str {
+                info!("New client connected: {} ({})", client_ip_str, hostname);
+            } else {
+                info!("New client connected: {}", client_ip_str);
+            }
+        }
+    }
+
+    // 2. Read the incoming HTTP request
     let mut buf = vec![0; 8192];
     if let Ok(n) = stream.read(&mut buf) {
         if n > 0 {
             let request = String::from_utf8_lossy(&buf[..n]);
+
+            // Log full request details if debug mode is enabled
             if debug {
                 info!("DEBUG REQUEST:\n{}", request);
             }
+
+            // 3. Route request to appropriate handler based on HTTP Method
             let method = request.split_whitespace().next().unwrap_or("");
             match method {
                 "GET" => {
@@ -167,7 +198,7 @@ fn handle_client(
                 ),
                 "SUBSCRIBE" => handle_subscribe_request(stream, debug),
                 "HEAD" => handle_head_request(stream, debug),
-                _ => (),
+                _ => (), // Ignore unsupported methods
             }
         }
     }
@@ -582,9 +613,11 @@ fn generate_meta_response(path: &str, ip_address: String, _server_name: String) 
 fn decode(s: &str) -> String {
     s.replace("%20", " ").replace("&amp;", "&")
 }
+
 fn encode(s: &str) -> String {
     s.replace(" ", "%20").replace("&", "&amp;")
 }
+
 fn encode_title_name(s: &str) -> String {
     s.replace("&", "&amp;")
         .replace("<", "&lt;")
