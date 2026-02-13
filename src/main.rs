@@ -90,6 +90,15 @@ fn main() {
         cli.port
     );
 
+    if cli.verbose {
+        match fs::canonicalize(&cli.directory) {
+            Ok(path) => info!("Sharing directory: {}", path.display()),
+            Err(_) => info!(
+                "Sharing directory: {} (could not resolve absolute path)",
+                cli.directory
+            ),
+        }
+    }
     if cli.cache {
         info!("Response caching is ENABLED.");
     } else {
@@ -367,14 +376,22 @@ fn handle_post_request(
     let response_body = if request.contains("#GetSortCapabilities") {
         GET_SORT_CAPABILITIES_RESPONSE_XML.to_string()
     } else {
-        let object_id = request
-            .find("<ObjectID>")
-            .map(|s| {
-                let start = s + 10;
-                let end = request[start..].find("</ObjectID>").unwrap_or(0);
-                &request[start..start + end]
-            })
-            .unwrap_or("0");
+        // Robust ObjectID extraction to prevent "Heisenbugs"
+        let object_id = if let Some(start_idx) = request.find("<ObjectID>") {
+            let start = start_idx + 10;
+            if let Some(end_idx) = request[start..].find("</ObjectID>") {
+                &request[start..start + end_idx]
+            } else {
+                "0"
+            }
+        } else {
+            "0"
+        };
+
+        // Permanent debug log to track TV navigation
+        if debug {
+            info!("DEBUG: Extracted ObjectID is [{}]", object_id);
+        }
 
         let start_index = request
             .find("<StartingIndex>")
