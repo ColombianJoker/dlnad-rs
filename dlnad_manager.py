@@ -23,9 +23,7 @@ class DLNADManager(rumps.App):
         self.start_button = rumps.MenuItem("Start Service", callback=self.start_service)
         self.stop_button = rumps.MenuItem("Stop Service", callback=self.stop_service)
         self.stop_button.set_callback(None)
-        self.dir_display = rumps.MenuItem(
-            f"Current Dir: {self.dlna_dir}", callback=None
-        )
+        self.dir_display = rumps.MenuItem(f"Shared Dir: {self.dlna_dir}", callback=None)
 
         self.menu = [
             self.dir_display,
@@ -70,8 +68,8 @@ class DLNADManager(rumps.App):
                     # Update the menu item title dynamically
                     # We iterate to find the item since the title changed
                     for item in self.menu:
-                        if "Current Dir:" in item:
-                            self.menu[item].title = f"Current Dir: {selected}"
+                        if "Shared Dir:" in item:
+                            self.menu[item].title = f"Shared Dir: {selected}"
 
                     rumps.notification("dlnad", "Directory Updated", selected)
         except Exception as e:
