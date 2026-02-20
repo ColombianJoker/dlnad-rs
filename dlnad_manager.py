@@ -3,6 +3,7 @@
 import os
 import signal
 import subprocess
+import sys
 import threading
 from tkinter import Tk, filedialog
 
@@ -77,6 +78,19 @@ class DLNADManager(rumps.App):
             rumps.alert(f"Selection Error: {e}")
 
     def start_service(self, _):
+        # Check if running as a bundled app or a script
+        if getattr(sys, "frozen", False):
+            # Path inside the .app bundle
+            base_path = os.path.dirname(sys.executable)
+            # In a .app, DATA_FILES usually end up in the Resources folder
+            binary_path = os.path.join(os.path.dirname(base_path), "Resources", "dlnad")
+        else:
+            # Path during development
+            base_path = os.path.dirname(os.path.abspath(__file__))
+            binary_path = os.path.join(base_path, "target", "release", "dlnad")
+
+        cmd = [binary_path, "-v", "-d", self.dlna_dir]
+
         if self.process:
             return
 
