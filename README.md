@@ -14,7 +14,7 @@ Includes a simple GUI: a menu app for MacOS, useable to select a directory to sh
   * Implements `CaptionInfo.sec` and `srh` protocol headers required for LG/Samsung TVs.
 * **Thumbnail Discovery**: Shows video previews by automatically linking `.jpg` or `.png` files.
 * **Toggleable Caching**: Optional `--cache` flag to freeze directory listings in memory for faster performance.
-* **Persistent Configuration**: Uses ~/.dlnad to store the choosen directory to share and the unique ID for the installation.
+* **Persistent Configuration**: Uses `~/.dlnad` to store the choosen directory to share and the _unique ID_ for the installation.
 
 ## Usage
 
