@@ -1,6 +1,7 @@
 # dlnad: Simple DLNA Server for LG WebOS
 
 A lightweight DLNA media server written in Rust, specifically optimized for LG WebOS TV clients.
+Includes a simple GUI: a menu app for MacOS, useable to select a directory to share, to start and stop the service and to check the logs.
 
 ## Features
 
@@ -13,6 +14,7 @@ A lightweight DLNA media server written in Rust, specifically optimized for LG W
   * Implements `CaptionInfo.sec` and `srh` protocol headers required for LG/Samsung TVs.
 * **Thumbnail Discovery**: Shows video previews by automatically linking `.jpg` or `.png` files.
 * **Toggleable Caching**: Optional `--cache` flag to freeze directory listings in memory for faster performance.
+* **Persistent Configuration**: Uses ~/.dlnad to store the choosen directory to share and the unique ID for the installation.
 
 ## Usage
 
@@ -23,16 +25,16 @@ Gunther: A simple DLNA server for LG WebOS
 Usage: dlnad [OPTIONS]
 
 Options:
+ptions:
   -p, --port <PORT>            [default: 8200]
   -i, --ip <IP_ADDRESS>        [default: 0.0.0.0]
   -d, --directory <DIRECTORY>  [default: .]
-  -c, --cache                  Enable response caching (static mode)
-  -n, --name <NAME>            Friendly name for the DLNA server
-  -v, --verbose                Enable info logging
-  --debug                      Print full HTTP request/response headers
+  -c, --cache
+  -C, --config <CONFIG>        [env: DLNAD_CONFIG=]
+  -n, --name <NAME>            [default: hostname]
+  -v, --verbose
   -h, --help                   Print help
   -V, --version                Print version
-
 ```
 
 ## LG WebOS Compatibility Notes
