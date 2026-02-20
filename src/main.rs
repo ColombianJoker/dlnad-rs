@@ -12,8 +12,9 @@ use clap::Parser;
 use dns_lookup::lookup_addr;
 use gethostname::gethostname;
 use local_ip_address::local_ip;
-use log::info;
+use log::{error, info};
 use mp4ameta::Tag;
+use uuid::Uuid;
 
 const NUM_THREADS: i32 = 64;
 const CONTENT_DIR_XML: &str = include_str!("ContentDir.xml");
@@ -43,9 +44,11 @@ struct Cli {
     #[arg(short = 'd', long = "directory", default_value = ".")]
     directory: String,
 
-    // Fixed 'shot' typo and corrected boolean flag syntax
     #[arg(short = 'c', long = "cache")]
     cache: bool,
+
+    #[arg(short = 'C', long = "config", env = "DLNAD_CONFIG")]
+    config: Option<String>,
 
     #[arg(short, long)]
     name: Option<String>,
@@ -59,15 +62,8 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let server_ip = if cli.ip_address == "0.0.0.0" {
-        match local_ip() {
-            Ok(ip) => ip.to_string(),
-            Err(_) => "127.0.0.1".to_string(),
-        }
-    } else {
-        cli.ip_address.clone()
-    };
 
+    // Handle logger immediately at start
     let log_level = if cli.verbose {
         log::LevelFilter::Debug
     } else {
@@ -75,12 +71,77 @@ fn main() {
     };
     env_logger::Builder::new().filter_level(log_level).init();
 
-    let server_name = match cli.name {
-        Some(name) => name,
-        None => gethostname()
-            .into_string()
-            .unwrap_or_else(|_| "Gunther".to_string()),
+    // Resolve Config Path: Flag > Env > Default
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| shellexpand::tilde("~/.dlnad").into_owned());
+    let path = Path::new(&config_path);
+
+    // Resolve or Generate UUID
+    let mut uuid_str = String::new();
+    let mut config_lines: Vec<String> = Vec::new();
+
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(path) {
+            for line in content.lines() {
+                if line.starts_with("UUID=") {
+                    uuid_str = line
+                        .split('=')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim_matches('"')
+                        .trim()
+                        .to_string();
+                }
+                config_lines.push(line.to_string());
+            }
+        }
+    }
+
+    if uuid_str.is_empty() {
+        uuid_str = Uuid::new_v4().to_string();
+        info!("No persistent UUID found. Generating: {}", uuid_str);
+        config_lines.push(format!("UUID=\"{}\"", uuid_str));
+        if let Err(e) = fs::write(path, config_lines.join("\n")) {
+            error!("Failed to save UUID to {}: {}", config_path, e);
+        }
+    }
+
+    let server_uuid = uuid_str;
+    let usn = format!(
+        "uuid:{}::urn:schemas-upnp-org:device:MediaServer:1",
+        server_uuid
+    );
+
+    // Sharing directory setup
+    let shared_dir_raw = if cli.directory == "." {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        shellexpand::tilde(&cli.directory).into_owned()
     };
+
+    let directory_clone = fs::canonicalize(&shared_dir_raw)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(shared_dir_raw);
+
+    // Network and Logger Setup
+    let server_ip = if cli.ip_address == "0.0.0.0" {
+        local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string())
+    } else {
+        cli.ip_address.clone()
+    };
+
+    let server_name = cli.name.unwrap_or_else(|| {
+        gethostname()
+            .into_string()
+            .unwrap_or_else(|_| "Gunther".to_string())
+    });
 
     info!(
         "DLNA server {} (version {}) listening on {}:{}",
@@ -89,27 +150,13 @@ fn main() {
         server_ip,
         cli.port
     );
-
     if cli.verbose {
-        match fs::canonicalize(&cli.directory) {
-            Ok(path) => info!("Sharing directory: {}", path.display()),
-            Err(_) => info!(
-                "Sharing directory: {} (could not resolve absolute path)",
-                cli.directory
-            ),
-        }
-    }
-    if cli.cache {
-        info!("Response caching is ENABLED.");
-    } else {
-        info!("Response caching is DISABLED (Dynamic directory mode).");
+        info!("Server UUID: {}", server_uuid);
     }
 
-    let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
-    // Initialize the thread-safe HashSet for tracking clients
-    let connected_clients: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
-    let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port)).unwrap();
+    info!("Sharing directory: {}", directory_clone);
 
+    // SSDP Multicast Setup
     let ssdp_socket = UdpSocket::bind(format!("0.0.0.0:{}", SSDP_PORT)).unwrap();
     let multicast_addr = "239.255.255.250".parse().unwrap();
     let interface_ip: std::net::Ipv4Addr = server_ip.parse().unwrap();
@@ -118,7 +165,9 @@ fn main() {
         .unwrap();
 
     let mut ssdp_response = Vec::new();
-    write!(ssdp_response, "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nLOCATION: http://{}:{}/rootDesc.xml\r\nSERVER: UPnP/1.0 DLNADOC/1.50 Gunther/{}\r\nST: urn:schemas-upnp-org:device:MediaServer:1\r\nUSN: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2::urn:schemas-upnp-org:device:MediaServer:1\r\n\r\n", server_ip, cli.port, env!("BUILD_VERSION")).unwrap();
+    write!(ssdp_response, "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nLOCATION: http://{}:{}/rootDesc.xml\r\nSERVER: UPnP/1.0 DLNADOC/1.50 Gunther/{}\r\nST: urn:schemas-upnp-org:device:MediaServer:1\r\nUSN: {}\r\n\r\n",
+        server_ip, cli.port, env!("BUILD_VERSION"), usn
+    ).unwrap();
 
     let ssdp_socket_clone = ssdp_socket.try_clone().unwrap();
     thread::spawn(move || {
@@ -130,16 +179,22 @@ fn main() {
         }
     });
 
+    // 5. TCP Thread Pool Setup
+    let cache: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let connected_clients: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", cli.port)).unwrap();
     let (tx, rx) = mpsc::channel();
     let rx = Arc::new(Mutex::new(rx));
 
     for _ in 0..NUM_THREADS {
         let rx = Arc::clone(&rx);
         let cache = Arc::clone(&cache);
-        let clients_clone = Arc::clone(&connected_clients); // Ownership moved into the thread
+        let clients_clone = Arc::clone(&connected_clients);
         let ip_to_pass = server_ip.clone();
-        let directory_clone = cli.directory.clone();
+        let port_to_pass = cli.port;
+        let dir_for_thread = directory_clone.clone();
         let server_name_clone = server_name.clone();
+        let server_uuid_clone = server_uuid.clone();
         let debug_flag = cli.debug;
         let cache_flag = cli.cache;
 
@@ -149,10 +204,12 @@ fn main() {
                 handle_client(
                     stream,
                     cache.clone(),
-                    Arc::clone(&clients_clone), // Use Arc::clone explicitly here
+                    Arc::clone(&clients_clone),
                     ip_to_pass.clone(),
-                    directory_clone.clone(),
+                    port_to_pass,
+                    dir_for_thread.clone(),
                     server_name_clone.clone(),
+                    server_uuid_clone.clone(),
                     debug_flag,
                     cache_flag,
                 );
@@ -172,91 +229,70 @@ fn handle_client(
     cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     connected_clients: Arc<Mutex<HashSet<String>>>,
     ip_address: String,
+    port: u16,
     directory: String,
     server_name: String,
+    server_uuid: String,
     debug: bool,
     cache_enabled: bool,
 ) {
-    // Report new client connection with Reverse DNS resolution
     if let Ok(addr) = stream.peer_addr() {
-        let client_ip = addr.ip();
-        let client_ip_str = client_ip.to_string();
-
+        let client_ip_str = addr.ip().to_string();
         let mut clients = connected_clients.lock().unwrap();
-        // Only log if this is the first time the IP is seen in this session
         if clients.insert(client_ip_str.clone()) {
-            // Attempt to resolve hostname; fall back to IP if resolution fails
-            let hostname = lookup_addr(&client_ip).unwrap_or_else(|_| client_ip_str.clone());
-
-            if hostname != client_ip_str {
-                info!("New client connected: {} ({})", client_ip_str, hostname);
-            } else {
-                info!("New client connected: {}", client_ip_str);
-            }
+            let hostname = lookup_addr(&addr.ip()).unwrap_or_else(|_| client_ip_str.clone());
+            info!("New client connected: {} ({})", client_ip_str, hostname);
         }
     }
 
-    // 2. Read the incoming HTTP request
     let mut buf = vec![0; 8192];
     if let Ok(n) = stream.read(&mut buf) {
         if n > 0 {
             let request = String::from_utf8_lossy(&buf[..n]);
-
-            // Log full request details if debug mode is enabled
             if debug {
                 info!("DEBUG REQUEST:\n{}", request);
             }
 
-            // 3. Route request to appropriate handler based on HTTP Method
             let method = request.split_whitespace().next().unwrap_or("");
             match method {
-                "GET" => {
-                    handle_get_request(stream, &request, ip_address, directory, server_name, debug)
-                }
+                "GET" => handle_get_request(
+                    stream,
+                    &request,
+                    ip_address,
+                    port,
+                    directory,
+                    server_name,
+                    server_uuid,
+                    debug,
+                ),
                 "POST" => handle_post_request(
                     stream,
                     request.to_string(),
                     cache,
                     ip_address,
+                    port,
                     directory,
                     server_name,
                     debug,
                     cache_enabled,
                 ),
-                "SUBSCRIBE" => handle_subscribe_request(stream, debug),
+                "SUBSCRIBE" => handle_subscribe_request(stream, server_uuid, debug),
                 "HEAD" => handle_head_request(stream, debug),
-                _ => (), // Ignore unsupported methods
+                _ => (),
             }
         }
     }
-}
-
-fn handle_subscribe_request(mut stream: TcpStream, debug: bool) {
-    let response = "HTTP/1.1 200 OK\r\nSID: uuid:4d696e69-444c-164e-9d41-b827eb96c6c2\r\nTIMEOUT: Second-300\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    if debug {
-        info!("DEBUG RESPONSE HEADERS:\n{}", response);
-    }
-    let _ = stream.write_all(response.as_bytes());
-}
-
-fn handle_head_request(mut stream: TcpStream, debug: bool) {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: 0\r\ncontentFeatures.dlna.org: {}\r\nConnection: close\r\n\r\n",
-        DLNA_FEATURES
-    );
-    if debug {
-        info!("DEBUG RESPONSE HEADERS:\n{}", response);
-    }
-    let _ = stream.write_all(response.as_bytes());
 }
 
 fn handle_get_request(
     mut stream: TcpStream,
     http_request: &str,
     ip_address: String,
+    port: u16,
     directory: String,
     server_name: String,
-    debug: bool,
+    server_uuid: String,
+    _debug: bool,
 ) {
     let path = decode(http_request.split_whitespace().nth(1).unwrap_or("/"));
     let trimmed_path = path.trim_start_matches(['.', '/']);
@@ -268,10 +304,15 @@ fn handle_get_request(
         | "ConnectionMgr.xml"
         | "X_MS_MediaReceiverRegistrar.xml" => {
             let content = match trimmed_path {
-                "rootDesc.xml" => ROOT_DESC_XML.replace(
-                    "<friendlyName>Gunther</friendlyName>",
-                    &format!("<friendlyName>{}</friendlyName>", server_name),
-                ),
+                "rootDesc.xml" => ROOT_DESC_XML
+                    .replace(
+                        "<friendlyName>Gunther</friendlyName>",
+                        &format!("<friendlyName>{}</friendlyName>", server_name),
+                    )
+                    .replace(
+                        "uuid:4d696e69-444c-164e-9d41-b827eb96c6c2",
+                        &format!("uuid:{}", server_uuid),
+                    ),
                 "ContentDir.xml" => CONTENT_DIR_XML.to_string(),
                 "ConnectionMgr.xml" => CONNECTION_MGR_XML.to_string(),
                 _ => X_MS_MEDIA_RECEIVER_REGISTRAR_XML.to_string(),
@@ -280,9 +321,6 @@ fn handle_get_request(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n",
                 content.len()
             );
-            if debug {
-                info!("DEBUG RESPONSE HEADERS:\n{}", header);
-            }
             let _ = stream.write_all(header.as_bytes());
             let _ = stream.write_all(content.as_bytes());
             return;
@@ -298,7 +336,6 @@ fn handle_get_request(
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
-
         let mime_type = match ext.as_str() {
             "vtt" => "text/vtt",
             "srt" => "text/srt",
@@ -311,9 +348,9 @@ fn handle_get_request(
         if ext == "vtt" || ext == "srt" {
             let safe_path = encode(path.trim_start_matches('/'));
             extra_headers = format!(
-                "CaptionInfo.sec: http://{}:8200/{}\r\n\
-                 ContentFeatures.dlna.org: {}\r\n",
+                "CaptionInfo.sec: http://{}:{}/{}\r\nContentFeatures.dlna.org: {}\r\n",
                 ip_address,
+                port,
                 safe_path,
                 "DLNA.ORG_PN=SUBTITLE;DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             );
@@ -333,12 +370,7 @@ fn handle_get_request(
         }
 
         let header = format!(
-            "HTTP/1.1 {} Partial Content\r\n\
-            Content-Range: bytes {}-{}/{}\r\n\
-            Content-Type: {}\r\n\
-            Content-Length: {}\r\n\
-            Accept-Ranges: bytes\r\n\
-            {}Connection: close\r\n\r\n",
+            "HTTP/1.1 {} Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{}Connection: close\r\n\r\n",
             if start_range > 0 { "206" } else { "200" },
             start_range,
             file_size - 1,
@@ -348,9 +380,6 @@ fn handle_get_request(
             extra_headers
         );
 
-        if debug {
-            info!("DEBUG RESPONSE HEADERS:\n{}", header);
-        }
         let _ = stream.write_all(header.as_bytes());
         let mut file = file;
         let _ = file.seek(SeekFrom::Start(start_range));
@@ -368,54 +397,49 @@ fn handle_post_request(
     request: String,
     cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     ip_address: String,
+    port: u16,
     directory: String,
     server_name: String,
     debug: bool,
-    cache_enabled: bool, // New parameter to toggle behavior
+    cache_enabled: bool,
 ) {
     let response_body = if request.contains("#GetSortCapabilities") {
         GET_SORT_CAPABILITIES_RESPONSE_XML.to_string()
     } else {
-        // Robust ObjectID extraction to prevent "Heisenbugs"
-        let object_id = if let Some(start_idx) = request.find("<ObjectID>") {
-            let start = start_idx + 10;
-            if let Some(end_idx) = request[start..].find("</ObjectID>") {
-                &request[start..start + end_idx]
-            } else {
-                "0"
-            }
-        } else {
-            "0"
-        };
+        let object_id = request
+            .find("<ObjectID>")
+            .and_then(|start| {
+                request[start + 10..]
+                    .find("</ObjectID>")
+                    .map(|end| &request[start + 10..start + 10 + end])
+            })
+            .unwrap_or("0");
 
-        // Permanent debug log to track TV navigation
         if debug {
-            info!("DEBUG: Extracted ObjectID is [{}]", object_id);
+            info!("DEBUG: Handling POST request for ObjectID: {}", object_id);
         }
 
         let start_index = request
             .find("<StartingIndex>")
-            .map(|s| {
-                let start = s + 15;
-                let end = request[start..].find("</StartingIndex>").unwrap_or(0);
-                request[start..start + end].parse::<usize>().unwrap_or(0)
+            .and_then(|s| {
+                request[s + 15..]
+                    .find("</StartingIndex>")
+                    .map(|e| request[s + 15..s + 15 + e].parse::<usize>().unwrap_or(0))
             })
             .unwrap_or(0);
 
         let requested_count = request
             .find("<RequestedCount>")
-            .map(|s| {
-                let start = s + 16;
-                let end = request[start..].find("</RequestedCount>").unwrap_or(0);
-                request[start..start + end].parse::<usize>().unwrap_or(0)
+            .and_then(|s| {
+                request[s + 16..]
+                    .find("</RequestedCount>")
+                    .map(|e| request[s + 16..s + 16 + e].parse::<usize>().unwrap_or(100))
             })
             .unwrap_or(100);
 
-        // Conditional Caching Logic
         if cache_enabled {
             let cache_key = format!("{}:{}:{}", object_id, start_index, requested_count);
             let mut cache_lock = cache.lock().unwrap();
-
             if let Some(cached) = cache_lock.get(&cache_key) {
                 String::from_utf8_lossy(cached).to_string()
             } else {
@@ -426,18 +450,18 @@ fn handle_post_request(
                         object_id,
                         start_index,
                         requested_count,
-                        ip_address.clone(),
-                        directory.clone(),
+                        ip_address,
+                        port,
+                        directory,
                         server_name.clone(),
                     )
                 } else {
-                    generate_meta_response(object_id, ip_address.clone(), server_name.clone())
+                    generate_meta_response(object_id, ip_address, port, server_name.clone())
                 };
                 cache_lock.insert(cache_key, resp.as_bytes().to_vec());
                 resp
             }
         } else {
-            // Bypass cache: Generate fresh response directly
             if object_id == "0"
                 || Path::new(&format!("{}/{}", directory, decode(object_id))).is_dir()
             {
@@ -446,11 +470,12 @@ fn handle_post_request(
                     start_index,
                     requested_count,
                     ip_address,
+                    port,
                     directory,
                     server_name.clone(),
                 )
             } else {
-                generate_meta_response(object_id, ip_address, server_name.clone())
+                generate_meta_response(object_id, ip_address, port, server_name.clone())
             }
         }
     };
@@ -461,20 +486,28 @@ fn handle_post_request(
         server_name,
         env!("BUILD_VERSION")
     );
-
-    if debug {
-        info!("DEBUG RESPONSE HEADERS:\n{}", header);
-    }
-
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(response_body.as_bytes());
 }
 
-fn format_duration(seconds: u64) -> String {
-    let h = seconds / 3600;
-    let m = (seconds % 3600) / 60;
-    let s = seconds % 60;
-    format!("{:01}:{:02}:{:02}", h, m, s)
+fn handle_subscribe_request(mut stream: TcpStream, server_uuid: String, debug: bool) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nSID: uuid:{}\r\nTIMEOUT: Second-300\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        server_uuid
+    );
+
+    if debug {
+        info!("DEBUG: SUSCRIBE Response:\n{}", response);
+    }
+    let _ = stream.write_all(response.as_bytes());
+}
+
+fn handle_head_request(mut stream: TcpStream, _debug: bool) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nAccept-Ranges: bytes\r\nContent-Length: 0\r\ncontentFeatures.dlna.org: {}\r\nConnection: close\r\n\r\n",
+        DLNA_FEATURES
+    );
+    let _ = stream.write_all(response.as_bytes());
 }
 
 fn generate_browse_response(
@@ -482,6 +515,7 @@ fn generate_browse_response(
     start_index: usize,
     requested_count: usize,
     ip_address: String,
+    port: u16,
     directory: String,
     _server_name: String,
 ) -> String {
@@ -503,21 +537,20 @@ fn generate_browse_response(
                 continue;
             }
             let entry_path = entry.path();
-            let is_dir = entry_path.is_dir();
             let ext = entry_path
                 .extension()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            if is_dir || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
-                entries.push((name, is_dir, entry_path));
+            if entry_path.is_dir() || ["mp4", "mkv", "avi", "mov"].contains(&ext.as_str()) {
+                entries.push((name, entry_path.is_dir(), entry_path));
             }
         }
     }
-
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+
     let total_matches = entries.len();
-    let slice = entries
+    let returned = entries
         .iter()
         .skip(start_index)
         .take(if requested_count == 0 {
@@ -526,88 +559,71 @@ fn generate_browse_response(
             requested_count
         });
 
-    let mut returned_count = 0;
-    for (name, is_dir, entry_path) in slice {
+    let mut count = 0;
+    for (name, is_dir, entry_path) in returned {
         let child_id = if relative_dir.is_empty() {
             name.clone()
         } else {
             format!("{}/{}", relative_dir, name)
         };
         let encoded_id = encode(&child_id);
-
         let mut display_title = encode_title_name(name);
-        let mut display_artist = String::new();
-        let mut display_desc = String::new();
         let mut duration_str = String::new();
         let mut subtitle_xml = String::new();
         let mut thumb_xml = String::new();
-        let mut video_res_attr = String::new();
 
-        if !*is_dir {
+        if !is_dir {
             if let Ok(tag) = Tag::read_from_path(entry_path) {
                 if let Some(t) = tag.title() {
                     display_title = encode_title_name(t);
                 }
-                if let Some(a) = tag.artist() {
-                    display_artist = format!("<upnp:artist>{}</upnp:artist>", encode_title_name(a));
-                }
-                display_desc = format!(
-                    "<dc:description>{}</dc:description>",
-                    encode_title_name(name)
+                duration_str = format!(
+                    " duration=\"{}\"",
+                    format_duration(tag.duration().as_secs())
                 );
-                let d = tag.duration();
-                duration_str = format!(" duration=\"{}\"", format_duration(d.as_secs()));
             }
-
-            // Subtitle Detection
-            let srt_path = entry_path.with_extension("srt");
-            let vtt_path = entry_path.with_extension("vtt");
-            let (sub_path, sub_mime) = if srt_path.exists() {
-                (Some(srt_path), "text/srt")
-            } else if vtt_path.exists() {
-                (Some(vtt_path), "text/vtt")
-            } else {
-                (None, "")
-            };
-
-            if let Some(p) = sub_path {
-                let sub_name = p.file_name().unwrap().to_string_lossy();
-                let sub_child_id = if relative_dir.is_empty() {
-                    sub_name.into_owned()
-                } else {
-                    format!("{}/{}", relative_dir, sub_name)
-                };
-                let sub_url = format!("http://{}:8200/{}", ip_address, encode(&sub_child_id));
-                video_res_attr = format!(
-                    " pv:subtitleFileUri=\"{}\" xmlns:pv=\"http://www.pv.com/pvns/\"",
-                    sub_url
+            // Subtitle & Thumb logic (dynamic port)
+            if let Some(p) = ["srt", "vtt"]
+                .iter()
+                .map(|e| entry_path.with_extension(e))
+                .find(|p| p.exists())
+            {
+                let sub_url = format!(
+                    "http://{}:{}/{}",
+                    ip_address,
+                    port,
+                    encode(&format!(
+                        "{}/{}",
+                        relative_dir,
+                        p.file_name().unwrap().to_string_lossy()
+                    ))
                 );
                 subtitle_xml = format!(
-                    "<res protocolInfo=\"http-get:*:{} :*\">{}</res>\
-                     <sec:CaptionInfoEx xmlns:sec=\"http://www.sec.co.kr/\">{}</sec:CaptionInfoEx>",
-                    sub_mime, sub_url, sub_url
+                    "<res protocolInfo=\"http-get:*:{} :*\">{}</res><sec:CaptionInfoEx xmlns:sec=\"http://www.sec.co.kr/\">{}</sec:CaptionInfoEx>",
+                    if p.extension().unwrap() == "srt" {
+                        "text/srt"
+                    } else {
+                        "text/vtt"
+                    },
+                    sub_url,
+                    sub_url
                 );
             }
-
-            // Thumbnail Detection
-            let jpg_path = entry_path.with_extension("jpg");
-            let png_path = entry_path.with_extension("png");
-            let thumb_path = if jpg_path.exists() {
-                Some(jpg_path)
-            } else if png_path.exists() {
-                Some(png_path)
-            } else {
-                None
-            };
-
-            if let Some(p) = thumb_path {
-                let thumb_name = p.file_name().unwrap().to_string_lossy();
-                let thumb_child_id = if relative_dir.is_empty() {
-                    thumb_name.into_owned()
-                } else {
-                    format!("{}/{}", relative_dir, thumb_name)
-                };
-                let thumb_url = format!("http://{}:8200/{}", ip_address, encode(&thumb_child_id));
+            if let Some(p) = ["jpg", "png"]
+                .iter()
+                .map(|e| entry_path.with_extension(e))
+                .find(|p| p.exists())
+            {
+                let thumb_url = format!(
+                    "http://{}:{}/{}",
+                    ip_address,
+                    port,
+                    encode(&format!(
+                        "{}/{}",
+                        relative_dir,
+                        p.file_name().unwrap().to_string_lossy()
+                    ))
+                );
                 thumb_xml = format!(
                     "<upnp:albumArtURI dlna:profileID=\"JPEG_TN\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">{}</upnp:albumArtURI>",
                     thumb_url
@@ -622,42 +638,45 @@ fn generate_browse_response(
             );
         } else {
             didl_raw += &format!(
-                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\"><dc:title>{}</dc:title>{}{}{}<upnp:class>object.item.videoItem</upnp:class><res protocolInfo=\"http-get:*:video/mp4:{}\"{}{}>http://{}:8200/{}</res>{}</item>",
+                "<item id=\"{}\" parentID=\"{}\" restricted=\"1\"><dc:title>{}</dc:title>{}<upnp:class>object.item.videoItem</upnp:class><res protocolInfo=\"http-get:*:video/mp4:{}\"{}>http://{}:{}/{}</res>{}</item>",
                 encoded_id,
                 path,
                 display_title,
-                display_artist,
-                display_desc,
                 thumb_xml,
                 DLNA_FEATURES,
                 duration_str,
-                video_res_attr,
                 ip_address,
+                port,
                 encoded_id,
                 subtitle_xml
             );
         }
-        returned_count += 1;
+        count += 1;
     }
     didl_raw += "</DIDL-Lite>";
-    let escaped_didl = didl_raw
+    let escaped = didl_raw
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace("\"", "&quot;")
         .replace("'", "&apos;");
-
     format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:BrowseResponse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><Result>{}</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>1</UpdateID></u:BrowseResponse></s:Body></s:Envelope>",
-        escaped_didl, returned_count, total_matches
+        escaped, count, total_matches
     )
 }
 
-fn generate_meta_response(path: &str, ip_address: String, _server_name: String) -> String {
+fn generate_meta_response(
+    path: &str,
+    ip_address: String,
+    port: u16,
+    _server_name: String,
+) -> String {
     let result_xml = fmt::format(format_args!(
         include_str!("meta_response_result.xml"),
         ip_address, path
     ))
+    .replace(":8200/", &format!(":{}/", port))
     .replace(
         "http-get:*:video/mp4:*",
         &format!("http-get:*:video/mp4:{}", DLNA_FEATURES),
@@ -668,14 +687,20 @@ fn generate_meta_response(path: &str, ip_address: String, _server_name: String) 
     )
 }
 
+fn format_duration(seconds: u64) -> String {
+    format!(
+        "{:01}:{:02}:{:02}",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
 fn decode(s: &str) -> String {
     s.replace("%20", " ").replace("&amp;", "&")
 }
-
 fn encode(s: &str) -> String {
     s.replace(" ", "%20").replace("&", "&amp;")
 }
-
 fn encode_title_name(s: &str) -> String {
     s.replace("&", "&amp;")
         .replace("<", "&lt;")
