@@ -1,6 +1,7 @@
 #!/usr/bin/env python3.11
 #
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -15,7 +16,12 @@ class DLNADManager(rumps.App):
         self.menu_icon = "📺"
         super(DLNADManager, self).__init__(self.menu_icon, icon=None)
         self.config_path = os.path.expanduser("~/.dlnad")
-        self.dlna_dir = self.load_config()
+
+        # Load initial config
+        config = self.load_config()
+        self.dlna_dir = config.get("DLNA_DIR", os.path.expanduser("~"))
+        self.custom_command = config.get("DLNAD_COMMAND")
+
         self.process = None
         self.log_content = []
 
@@ -23,7 +29,9 @@ class DLNADManager(rumps.App):
         self.start_button = rumps.MenuItem("Start Service", callback=self.start_service)
         self.stop_button = rumps.MenuItem("Stop Service", callback=self.stop_service)
         self.stop_button.set_callback(None)
-        self.dir_display = rumps.MenuItem(f"Shared Dir: {self.dlna_dir}", callback=None)
+        self.dir_display = rumps.MenuItem(
+            f"Current Dir: {self.dlna_dir}", callback=None
+        )
 
         self.menu = [
             self.dir_display,
@@ -36,18 +44,31 @@ class DLNADManager(rumps.App):
         ]
 
     def load_config(self):
-        """Search for DLNA_DIR in ~/.dlnad"""
+        """Search for DLNA_DIR and DLNAD_COMMAND in ~/.dlnad"""
+        config = {}
         if os.path.exists(self.config_path):
             with open(self.config_path, "r") as f:
                 for line in f:
-                    if line.startswith("DLNA_DIR="):
-                        return line.split("=")[1].strip().strip('"')
-        return os.path.expanduser("~")  # Default to HOME
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        config[key.strip()] = value.strip().strip('"')
+        return config
 
-    def save_config(self, path):
+    def save_config(self, directory=None):
+        """Save current configuration back to ~/.dlnad while preserving other variables."""
+        config = self.load_config()
+
+        if directory:
+            config["DLNA_DIR"] = directory
+            self.dlna_dir = directory
+
         with open(self.config_path, "w") as f:
-            f.write(f'DLNA_DIR="{path}"\n')
-        self.dlna_dir = path
+            for key, value in config.items():
+                f.write(f'{key}="{value}"\n')
+
         self.title = f"{self.menu_icon} (Ready)"
 
     @rumps.clicked("Select New Directory")
@@ -64,12 +85,14 @@ class DLNADManager(rumps.App):
             if proc.returncode == 0:
                 selected = proc.stdout.strip()
                 if selected:
-                    self.save_config(selected)
+                    self.save_config(directory=selected)
                     # Update the menu item title dynamically
-                    # We iterate to find the item since the title changed
                     for item in self.menu:
-                        if "Shared Dir:" in item:
-                            self.menu[item].title = f"Shared Dir: {selected}"
+                        if (
+                            isinstance(self.menu[item], rumps.MenuItem)
+                            and "Current Dir:" in self.menu[item].title
+                        ):
+                            self.menu[item].title = f"Current Dir: {selected}"
 
                     rumps.notification("dlnad", "Directory Updated", selected)
         except Exception as e:
@@ -79,18 +102,27 @@ class DLNADManager(rumps.App):
         if self.process:
             return
 
-        # Check if running as a bundled app or a script
+        # 1. Resolve Binary Path for Default Command
         if getattr(sys, "frozen", False):
             bundle_res = os.path.join(
                 os.path.dirname(sys.executable), "..", "Resources"
             )
             binary_path = os.path.abspath(os.path.join(bundle_res, "dlnad"))
         else:
-            # Path during development
             base_path = os.path.dirname(os.path.abspath(__file__))
             binary_path = os.path.join(base_path, "target", "release", "dlnad")
 
-        cmd = [binary_path, "-v", "-d", self.dlna_dir]
+        # 2. Determine Command to Run
+        config = self.load_config()
+        self.custom_command = config.get("DLNAD_COMMAND")
+
+        if self.custom_command:
+            # Interpolate {} with the current DLNA_DIR
+            interpolated_cmd = self.custom_command.replace("{}", self.dlna_dir)
+            cmd = shlex.split(interpolated_cmd)
+        else:
+            # Fallback to default
+            cmd = [binary_path, "-v", "-d", self.dlna_dir]
 
         try:
             self.process = subprocess.Popen(
@@ -106,34 +138,31 @@ class DLNADManager(rumps.App):
 
             self.start_button.set_callback(None)
             self.stop_button.set_callback(self.stop_service)
-            self.title = f"{self.menu_icon} (Running)"  # Update title to show status
-            rumps.notification("dlnad", "Service Started", f"Watching {self.dlna_dir}")
+            self.title = f"{self.menu_icon} (Running)"
+            rumps.notification(
+                "dlnad", "Service Started", f"Running: {' '.join(cmd[:3])}..."
+            )
         except Exception as e:
-            rumps.alert(f"Failed to start dlnad: {e}")
+            rumps.alert(f"Failed to start service: {e}")
 
     def read_logs(self):
-        for line in iter(self.process.stdout.readline, ""):
-            self.log_content.append(line)
-            if len(self.log_content) > 500:  # Keep last 500 lines
-                self.log_content.pop(0)
+        if self.process and self.process.stdout:
+            for line in iter(self.process.stdout.readline, ""):
+                self.log_content.append(line)
+                if len(self.log_content) > 500:
+                    self.log_content.pop(0)
 
     def stop_service(self, _):
         if self.process:
             try:
-                # 1. Check if the process is actually still alive
                 if self.process.poll() is None:
-                    # 2. Use a safer approach to killing the process group
                     pgid = os.getpgid(self.process.pid)
                     os.killpg(pgid, signal.SIGTERM)
-                else:
-                    print("DEBUG: Process already exited on its own.")
             except ProcessLookupError:
-                # Handle the specific error you saw
-                print("DEBUG: Process group already gone.")
+                pass
             except Exception as e:
-                print(f"DEBUG: Unexpected error during stop: {e}")
+                print(f"DEBUG: Error during stop: {e}")
             finally:
-                # 3. Always clean up the state regardless of how it died
                 self.process = None
                 self.start_button.set_callback(self.start_service)
                 self.stop_button.set_callback(None)
