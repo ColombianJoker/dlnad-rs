@@ -15,6 +15,7 @@ import rumps
 class DLNADManager(rumps.App):
     def __init__(self):
         self.menu_icon = "📺"
+        # We don't need to specify 'Quit' in the menu list; rumps adds it automatically.
         super(DLNADManager, self).__init__(self.menu_icon, icon=None)
         self.config_path = os.path.expanduser("~/.dlnad")
         self.log_file_path = "/tmp/dlnad_manager.log"
@@ -41,6 +42,7 @@ class DLNADManager(rumps.App):
             f"Current Dir: {self.dlna_dir}", callback=None
         )
 
+        # Removed 'Quit' from this list to prevent the double-item bug
         self.menu = [
             self.dir_display,
             "Select New Directory",
@@ -126,13 +128,11 @@ class DLNADManager(rumps.App):
             return
 
         if getattr(sys, "frozen", False):
-            # When running as .app, binary is in Resources
             bundle_res = os.path.join(
                 os.path.dirname(sys.executable), "..", "Resources"
             )
             binary_path = os.path.abspath(os.path.join(bundle_res, "dlnad"))
         else:
-            # When running from source
             base_path = os.path.dirname(os.path.abspath(__file__))
             binary_path = os.path.join(base_path, "target", "release", "dlnad")
 
@@ -140,7 +140,6 @@ class DLNADManager(rumps.App):
         self.custom_command = config.get("DLNAD_COMMAND")
 
         if self.custom_command:
-            # CRITICAL: Quote paths to handle spaces correctly before splitting
             interpolated_cmd = self.custom_command.replace(
                 "{s}", shlex.quote(self.dlna_dir)
             )
@@ -163,7 +162,6 @@ class DLNADManager(rumps.App):
                 start_new_session=True,
             )
 
-            # Verification: Check if process died immediately
             threading.Timer(1.0, self.verify_process).start()
 
             thread = threading.Thread(target=self.read_logs, daemon=True)
@@ -181,7 +179,6 @@ class DLNADManager(rumps.App):
             rumps.alert(f"Failed to start service: {e}")
 
     def verify_process(self):
-        """Checks if the process is still alive 1 second after starting."""
         if self.process:
             poll = self.process.poll()
             if poll is not None:
@@ -207,7 +204,6 @@ class DLNADManager(rumps.App):
             self.log("Stopping service...")
             try:
                 if self.process.poll() is None:
-                    # Kill the whole process group using SIGTERM (default for kill)
                     pgid = os.getpgid(self.process.pid)
                     os.killpg(pgid, signal.SIGTERM)
                     self.log(f"Sent SIGTERM to process group {pgid}")
@@ -230,24 +226,18 @@ class DLNADManager(rumps.App):
         )
         log_window.run()
 
-    @rumps.notifications
-    def notification_handler(self, info):
-        pass
-
-    def on_quit(self):
-        """Cleanup logic when app quits."""
-        self.log("App quitting. Cleaning up...")
+    # The standard 'Quit' item added by rumps will call this specifically named method if it exists
+    def quit_application(self):
+        self.log("App quitting via standard Quit item. Cleaning up...")
         if self.process:
             self.stop_service(None)
-        self.log("Cleanup complete. terminating app.")
-
-    # Overriding the default Quit handler in rumps
-    @rumps.clicked("Quit")
-    def quit(self, _):
-        self.on_quit()
+        self.log("Cleanup complete. Terminating.")
+        # Ensure we actually exit after cleanup
         rumps.quit_application()
 
 
 if __name__ == "__main__":
     app = DLNADManager()
+    # Replace the default Quit callback with our custom cleanup method
+    app.quit_button = rumps.MenuItem("Quit", callback=app.quit_application)
     app.run()
