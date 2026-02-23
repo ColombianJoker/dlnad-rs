@@ -50,6 +50,14 @@ To ensure subtitles and thumbnails appear correctly on LG TVs:
 
 3. **Internal Logic**: This server uses the `pv:subtitleFileUri` attribute and `DLNA.ORG_PN=SUBTITLE` features to trigger the TV's native subtitle engine.
 
+## Configuration file
+
+Both `dlnad` and `dlnad_manager` use the `~/.dlnad` configuration file, where:
+
+* **UUID**: Stores a generated UUID for this installation. If removed, `dlnad` will create and store a new one.
+* **DLNA_DIR**: Stores the selected directory for `dlnad_manager` menu app sharing.
+* **DLNAD_COMMAND**: If found, the command `dlnad_manager` will run. Will interpret `{d}` as the `dlnad` binary inside `dlnad_manager.app`, and `{s}` as the shared directory.
+
 ---
 
 *Ramón Barrios Láscar, 2026*
