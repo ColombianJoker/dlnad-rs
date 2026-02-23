@@ -29,6 +29,7 @@ __pycache__/
 # Py2app output
 build/
 dist/
+.eggs/
 
 # Local Configuration (User-specific paths)
 .dlnad
